@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rcabench-gateway
+  labels:
+    app: rcabench-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rcabench-gateway
+  template:
+    metadata:
+      labels:
+        app: rcabench-gateway
+    spec:
+      containers:
+        - name: gateway
+          # Replace this image with the registry:tag you build and push
+          image: rcabench-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DOWNSTREAM_URL
+              value: "https://ellm.nrp-nautilus.io/v1"
+          envFrom:
+            - secretRef:
+                name: rcabench-gateway-secret
+        - name: sleeper
+          image: busybox:1.36
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always

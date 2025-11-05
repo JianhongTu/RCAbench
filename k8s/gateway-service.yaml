@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rcabench-gateway
+  labels:
+    app: rcabench-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: rcabench-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
