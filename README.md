@@ -1,36 +1,124 @@
 # RCAbench
 
-This small service is the gateway/orchestrator entrypoint that accepts query requests and forwards them to a downstream LLM-like API. It's intentionally minimal for development.
+A cloud-based evaluation server for AI agents on cybersecurity tasks. This project provides an orchestrator (gateway) that dispatches tasks to workers, manages progress, and creates evaluation containers for root-cause localization on codebases.
 
-Quick start (local):
+## Roadmap
 
-1. Create a virtualenv and install dependencies:
+- [ ] Integrate the AgentBeats SDK
+- [ ] Create a dummy red agent and test on AgentBeats battle
+- [ ] Locally integrate Arvo docker-based evaluation workflow
+- [ ] Repurpose Arvo evaluation for root-cause localization task
+
+## Features
+
+- **Orchestrator Gateway**: FastAPI-based API with health checks, HTTP/WS queries.
+- **Kubernetes Deployment**: Scalable deployment on k8s with ingress.
+- **Client CLI**: Python client for testing API endpoints.
+- **Security**: TLS-enabled, secrets management.
+
+## Prerequisites
+
+- Python 3.11+
+- Docker
+- Kubernetes cluster (for deployment)
+- `kubectl` configured
+- Conda (optional, for environment management)
+
+## Quick Start
+
+### Local Development
+
+1. **Set up environment**:
+   ```bash
+   conda activate rcabench  # or create with conda env create -f environment.yml
+   pip install -r requirements.txt
+   ```
+
+2. **Configure secrets**:
+   - Copy `src/rcabench/.env.example` to `src/rcabench/.env`
+   - Set `OPENAI_API_KEY` and other variables.
+
+3. **Run locally**:
+   ```bash
+   make run-local
+   ```
+   This builds the Docker image and runs the container on `localhost:8080`.
+
+4. **Test with client**:
+   ```bash
+   python client.py health
+   python client.py query "Hello, world!"
+   ```
+
+### Kubernetes Deployment
+
+1. **Build and push image**:
+   ```bash
+   make build
+   make push
+   ```
+
+2. **Deploy to k8s**:
+   ```bash
+   make secret  # Creates k8s secrets
+   make deploy  # Deploys ingress, service, deployment
+   ```
+
+3. **Monitor deployment**:
+   ```bash
+   make logs
+   kubectl get pods -l app=rcabench
+   ```
+
+4. **Access the service**:
+   - External: `https://rcabench.nrp-nautilus.io` (with self-signed cert)
+   - Test: `python client.py health`
+
+5. **Tear down**:
+   ```bash
+   make teardown
+   ```
+
+## API Endpoints
+
+- `GET /health` - Health check
+- `POST /query` - HTTP query (JSON: `{"prompt": "your prompt"}`)
+- `WS /ws` - WebSocket query
+
+## Client Usage
+
+The `client.py` script provides a CLI for testing:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r gateway/requirements.txt
+# Health check
+python client.py health
+
+# HTTP query
+python client.py query "Explain AI"
+
+# WebSocket query
+python client.py ws "What is cybersecurity?"
 ```
 
-2. Run locally:
+Set `RCA_HOST` to change the target (default: deployment URL).
 
-```bash
-uvicorn gateway.main:app --host 0.0.0.0 --port 8080
-```
+## Configuration
 
-Note: The gateway will automatically load `gateway/.env` when started locally (if present). You can also export `OPENAI_API_KEY` in your shell prior to running.
+Environment variables (in `src/rcabench/.env`):
 
-3. Example request:
+- `OPENAI_API_KEY` - API key for downstream LLM
+- `DOWNSTREAM_URL` - Downstream API URL (default: `https://ellm.nrp-nautilus.io/v1`)
+- `PORT` - Container port (default: `8080`)
+- `LOG_LEVEL` - Logging level (default: `info`)
 
-```bash
-curl -s -X POST http://localhost:8080/query \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt": "Hello from test", "downstream_url": "https://ellm.nrp-nautilus.io/v1"}'
-```
+## Development
 
-Environment variables:
-- `DOWNSTREAM_URL` - default downstream URL used when `downstream_url` is not provided in the request (default: `https://ellm.nrp-nautilus.io/v1`).
-- `PORT` - port to listen on inside the container (default: `8080`).
+- **Linting**: Run tests with `python -m pytest`
+- **Docker**: `make build` to build image
+- **K8s**: Manifests in `k8s/` directory
 
-- `OPENAI_API_KEY` - API key used by the OpenAI python client to authenticate to the downstream endpoint (set this to your Envoy/OpenAI-compatible key).
-- `LOG_LEVEL` - logging level (default: `info`).
+## Security Notes
+
+- TLS is enabled with self-signed cert for testing.
+- Secrets are managed via k8s secrets.
+- For production, use valid certificates and proper secret management.
