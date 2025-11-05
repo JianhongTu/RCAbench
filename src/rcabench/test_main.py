@@ -2,7 +2,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-import gateway.main as mainmod
+import rcabench.main as mainmod
 
 
 client = TestClient(mainmod.app)

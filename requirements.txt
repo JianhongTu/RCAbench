@@ -4,6 +4,7 @@ httpx>=0.24.0
 pydantic>=1.10.0
 openai>=1.0.0
 python-dotenv>=1.0.0
+anyio>=4.0.0
 
 # dev/test
 pytest>=7.0

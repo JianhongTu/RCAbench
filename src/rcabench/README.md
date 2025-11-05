@@ -1,5 +1,4 @@
-"""markdown
-# RCAbench Gateway
+# RCAbench
 
 This small service is the gateway/orchestrator entrypoint that accepts query requests and forwards them to a downstream LLM-like API. It's intentionally minimal for development.
 

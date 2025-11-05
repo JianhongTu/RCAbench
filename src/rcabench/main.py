@@ -12,7 +12,7 @@ from .config import DOWNSTREAM_URL, OPENAI_API_KEY, DEFAULT_MODEL, PORT, LOG_LEV
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger("gateway")
 
-app = FastAPI(title="RCAbench Gateway", version="0.1.0")
+app = FastAPI(title="RCAbench", version="0.1.0")
 
 
 class QueryRequest(BaseModel):

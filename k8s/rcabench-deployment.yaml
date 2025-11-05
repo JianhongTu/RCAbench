@@ -17,7 +17,7 @@ spec:
       containers:
         - name: gateway
           # Replace this image with the registry:tag you build and push
-          image: tovitu/rcabench:latest
+          image: rcabench:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
