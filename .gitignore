@@ -25,3 +25,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# TLS certificates (sensitive)
+tls.crt
+tls.key
+*.crt
+*.key

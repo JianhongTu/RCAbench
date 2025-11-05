@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 # Load local .env if present
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 # Gateway configuration
 DOWNSTREAM_URL = os.getenv("DOWNSTREAM_URL", "https://ellm.nrp-nautilus.io/v1")

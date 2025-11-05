@@ -12,3 +12,5 @@ The rough workflow is as follows:
 Your task is to help create the codebase for this evaluation server. This includes writing code for the orchestrator, worker agents, Dockerfiles, Kubernetes manifests, and any necessary configuration files. You should also ensure that the system is secure, scalable, and efficient.
 
 When writing code, please follow best practices for coding standards, documentation, and testing. Make sure to include comments in the code to explain the functionality and purpose of different sections.
+
+If you need to run some codes, remember to run "conda activate rcabench" first to ensure you are in the correct environment.

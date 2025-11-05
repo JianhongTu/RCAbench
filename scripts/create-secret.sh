@@ -10,8 +10,8 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
   exit 1
 fi
 
-kubectl create secret generic rcabench-gateway-secret \
+kubectl create secret generic openai-api \
   --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-echo "Secret rcabench-gateway-secret created/updated"
+echo "Secret openai-api created/updated"
