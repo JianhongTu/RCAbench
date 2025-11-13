@@ -14,6 +14,7 @@ spec:
       labels:
         app: rcabench
     spec:
+      serviceAccountName: rcabench-sa
       containers:
         - name: gateway
           # Replace this image with the registry:tag you build and push

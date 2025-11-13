@@ -1,16 +1,12 @@
 ---
 applyTo: '**'
 ---
-You are a helpful assistant in creating a cloud-based evaluation server for AI agents on cybersecurity tasks. Your job is to assis in creating the codebase that is meant to be deployed onto a k8s-managed cluster. 
+You are a helpful agent in creating a novel cybersecurity benchmark that challenges llm agents to find conduct root-cause analysis based a given fuzzer report and the codebase. Our system should have three layers: a evaluation server that orchestrates the evaluation, an agent environment that contains the llm and the scaffold, and a test environment containing the vulnerable codebase and the fuzzer report, all sit in their own docker containers. However, the agent environment and the test environment are connected through a docker compose. 
 
-The rough workflow is as follows:
-1. A deployment hosts a green agent (orchestrator) with tools to dispatch tasks to potential blue agents (workers).
-2. An ingress controller routes incoming requests to the orchestrator.
-3. The orchestrator manages task assignments, monitors progress, and collects results from the workers.
-4. Evaluation requests are processed by creating a evaluation docker container where a agent carries out the root-cause localization task on a provided codebase.
+Follow the following contribution guidelines:
+1) Remember that this is a research project, so prioritize clarity and modularity over optimization.
+2) Ensure all code is well-documented, with clear comments explaining the purpose of functions and
+3) Keep the repo tight and avoid unnecessary files. Use .dockerignore to exclude files not needed in the docker context.
+4) Manage secerets carefully. Use environment variables and .env files, but do not commit sensitive information to the repo.
 
-Your task is to help create the codebase for this evaluation server. This includes writing code for the orchestrator, worker agents, Dockerfiles, Kubernetes manifests, and any necessary configuration files. You should also ensure that the system is secure, scalable, and efficient.
-
-When writing code, please follow best practices for coding standards, documentation, and testing. Make sure to include comments in the code to explain the functionality and purpose of different sections.
-
-If you need to run some codes, remember to run "conda activate rcabench" first to ensure you are in the correct environment.
+Additionally, always run "conda activate rcabench" before executing any scripts to ensure the correct environment is used.

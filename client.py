@@ -8,6 +8,7 @@ Usage:
     python client.py health
     python client.py query "Your prompt here"
     python client.py ws "Your prompt here"
+    python client.py evaluate "https://github.com/user/repo" --task root-cause
 
 Environment:
     Set RCA_HOST to the host (default: https://rcabench.nrp-nautilus.io)
@@ -30,7 +31,11 @@ RCA_HOST = os.getenv("RCA_HOST", DEFAULT_HOST)
 
 # SSL verification: default to False for the deployment host (self-signed cert), True for localhost
 DEFAULT_VERIFY_SSL = RCA_HOST == "http://localhost:8080"
-RCA_VERIFY_SSL = os.getenv("RCA_VERIFY_SSL", str(DEFAULT_VERIFY_SSL)).lower() in ("true", "1", "yes")
+RCA_VERIFY_SSL = os.getenv("RCA_VERIFY_SSL", str(DEFAULT_VERIFY_SSL)).lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 
 def health_check():
@@ -51,7 +56,7 @@ def query(prompt):
             f"{RCA_HOST}/query",
             json={"prompt": prompt},
             headers={"Content-Type": "application/json"},
-            verify=RCA_VERIFY_SSL
+            verify=RCA_VERIFY_SSL,
         )
         response.raise_for_status()
         result = response.json()
@@ -63,6 +68,25 @@ def query(prompt):
         sys.exit(1)
 
 
+def evaluate(codebase, task="root-cause"):
+    """Trigger an evaluation job."""
+    try:
+        response = requests.post(
+            f"{RCA_HOST}/evaluate",
+            json={"codebase": codebase, "task": task},
+            headers={"Content-Type": "application/json"},
+            verify=RCA_VERIFY_SSL,
+        )
+        response.raise_for_status()
+        result = response.json()
+        print("Evaluation job created:")
+        print(f"Job Name: {result['job_name']}")
+        print(f"Status: {result['status']}")
+    except requests.RequestException as e:
+        print(f"Evaluation failed: {e}")
+        sys.exit(1)
+
+
 async def websocket_query(prompt):
     """Send a query via WebSocket."""
     # Build WebSocket URI
@@ -70,7 +94,7 @@ async def websocket_query(prompt):
         uri = RCA_HOST.replace("https://", "wss://") + "/ws"
     else:
         uri = RCA_HOST.replace("http://", "ws://") + "/ws"
-    
+
     # SSL context for WebSocket
     ssl_context = None
     if uri.startswith("wss://"):
@@ -78,7 +102,7 @@ async def websocket_query(prompt):
         if not RCA_VERIFY_SSL:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-    
+
     try:
         async with websockets.connect(uri, ssl=ssl_context) as ws:
             await ws.send(json.dumps({"prompt": prompt}))
@@ -110,6 +134,13 @@ def main():
     ws_parser = subparsers.add_parser("ws", help="Send a query via WebSocket")
     ws_parser.add_argument("prompt", help="The prompt to send")
 
+    # Evaluate command
+    eval_parser = subparsers.add_parser("evaluate", help="Trigger an evaluation job")
+    eval_parser.add_argument("codebase", help="URL or path to the codebase")
+    eval_parser.add_argument(
+        "--task", default="root-cause", help="Evaluation task (default: root-cause)"
+    )
+
     args = parser.parse_args()
 
     if args.command == "health":
@@ -118,6 +149,8 @@ def main():
         query(args.prompt)
     elif args.command == "ws":
         asyncio.run(websocket_query(args.prompt))
+    elif args.command == "evaluate":
+        evaluate(args.codebase, args.task)
     else:
         parser.print_help()
 

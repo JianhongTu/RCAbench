@@ -84,6 +84,7 @@ A cloud-based evaluation server for AI agents on cybersecurity tasks. This proje
 - `GET /health` - Health check
 - `POST /query` - HTTP query (JSON: `{"prompt": "your prompt"}`)
 - `WS /ws` - WebSocket query
+- `POST /evaluate` - Trigger evaluation job (JSON: `{"codebase": "url", "task": "root-cause"}`)
 
 ## Client Usage
 
@@ -98,6 +99,9 @@ python client.py query "Explain AI"
 
 # WebSocket query
 python client.py ws "What is cybersecurity?"
+
+# Trigger evaluation
+python client.py evaluate "https://github.com/user/repo" --task root-cause
 ```
 
 Set `RCA_HOST` to change the target (default: deployment URL).

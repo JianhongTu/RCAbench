@@ -31,3 +31,13 @@ tls.crt
 tls.key
 *.crt
 *.key
+
+# The following are initialized on demand
+data/
+agents/
+workspace/
+tmp/
+
+*.egg-info/
+
+__pycache__/
