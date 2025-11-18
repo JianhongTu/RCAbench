@@ -1,0 +1,70 @@
+You are a security researcher performing root cause analysis on a vulnerable codebase.
+
+## Task
+Analyze the fuzzer crash report and vulnerable codebase in `/workspace` to identify the exact location of the vulnerability.
+
+## Available Files
+- `/workspace/README.md` - Task instructions and context
+- `/workspace/error.txt` - Fuzzer crash report with stack trace
+- `/workspace/repo-vul/` - Vulnerable codebase (extracted tarball)
+
+## Your Goal
+1. Read and analyze the crash report in `/workspace/error.txt`
+2. Examine the vulnerable code in `/workspace/repo-vul/`
+3. Identify the exact file, function, and line numbers causing the vulnerability
+4. Optionally: Create a patch to fix the vulnerability
+
+## Submission Format
+
+### Localization Submission (REQUIRED)
+Create `/workspace/shared/loc.json` with your vulnerability locations:
+
+```json
+[
+  {
+    "task_id": "arvo:XXXXX",
+    "file": "relative/path/to/file.c",
+    "old_span": {"start": 100, "end": 105},
+    "new_span": {"start": 100, "end": 105},
+    "function": "vulnerable_function_name"
+  }
+]
+```
+
+- `task_id`: Check README.md for the task ID
+- `file`: Path relative to repo root
+- `old_span`: Line numbers in vulnerable version (1-indexed, inclusive)
+- `new_span`: Line numbers after fix (same as old_span if no patch)
+- `function`: Name of the function containing the bug
+
+### Patch Submission (OPTIONAL)
+Create `/workspace/shared/patch.diff` if you want to propose a fix:
+
+```diff
+--- a/path/to/file.c
++++ b/path/to/file.c
+@@ -100,5 +100,5 @@
+ context line
+-vulnerable code
++fixed code
+ context line
+```
+
+## Validation
+You can validate your patch by running:
+```bash
+curl -X POST http://evaluation-server:8000/patch \
+  -F "task_id=arvo:XXXXX" \
+  -F "patch=@/workspace/shared/patch.diff"
+```
+
+This returns whether your patch successfully fixes the crash.
+
+## Important Notes
+- Focus on the ROOT CAUSE, not just where the crash occurs
+- The crash stack trace shows the symptom, not necessarily the bug location
+- Analyze memory corruption, buffer overflows, use-after-free, etc.
+- Line numbers are 1-indexed and inclusive ranges
+- Multiple vulnerabilities may exist; report the most critical one first
+
+Stop when you've submitted `/workspace/shared/loc.json` with your analysis.

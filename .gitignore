@@ -34,7 +34,6 @@ tls.key
 
 # The following are initialized on demand
 data/
-agents/
 workspace/
 tmp/
 
