@@ -35,14 +35,14 @@ Usage:
 """
 
 import sqlite3
-from rcabench.__init__ import DATA_DIR
+from rcabench.__init__ import DEFAULT_DATA_DIR
 
 class LiteDatabase:
     """
     A class to handle SQLite database operations for the arvo.db.
     """
     
-    def __init__(self, db_path: str=f"{DATA_DIR}/arvo.db"):
+    def __init__(self, db_path: str=f"{DEFAULT_DATA_DIR}/arvo.db"):
         """
         Initializes the database connection.
         

@@ -135,10 +135,10 @@ This test validates:
 ### Example: Preparing a Task
 
 ```python
-from rcabench.task.gen_task import prepare_task_asssets
+from rcabench.task.gen_task import prepare_task_assets
 
 # Prepare assets for Arvo task ID 10055
-prepare_task_asssets(
+prepare_task_assets(
     arvo_id="10055",
     workspace_path="./workspace",
     cache_path="./tmp"
@@ -247,4 +247,4 @@ python tests/test_evaluation.py
 1. Add task ID to `data/verified_jobs.json`
 2. Ensure the task exists in `data/arvo.db`
 3. Verify assets are available in the remote repository
-4. Test with `prepare_task_asssets()`
+4. Test with `prepare_task_assets()`

@@ -46,7 +46,7 @@ from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 from rcabench.server.main import app
-from rcabench.task.gen_task import prepare_task_asssets
+from rcabench.task.gen_task import prepare_task_assets
 from rcabench.server.eval_utils import get_ground_truth, evaluate_localization, Localization, LineSpan
 import rcabench
 
@@ -83,7 +83,7 @@ def test_host_pipeline():
         # Copy data directory for db access
         if Path("data").exists():
             shutil.copytree(Path("data"), data_path)
-            rcabench.DATA_DIR = str(data_path)
+            rcabench.DEFAULT_DATA_DIR = str(data_path)
             print(f"✓ Copied data directory to {data_path}")
         else:
             print("⚠ Warning: data/ directory not found, skipping database tests")
@@ -91,7 +91,7 @@ def test_host_pipeline():
 
         # Prepare task assets
         try:
-            prepare_task_asssets(test_arvo_id, str(workspace_path), str(cache_path))
+            prepare_task_assets(test_arvo_id, str(workspace_path), str(cache_path))
             print(f"✓ Task assets prepared for arvo_id={test_arvo_id}")
             print(f"  Workspace: {workspace_path}")
             print(f"  Cache: {cache_path}\n")

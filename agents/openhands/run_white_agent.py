@@ -8,13 +8,14 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import urlparse
 
 import docker
 import docker.errors
 import tomli_w
 from simple_parsing import ArgumentGenerationMode, ArgumentParser, flag
 
-from rcabench.task.gen_task import prepare_task_asssets
+from rcabench.task.gen_task import prepare_task_assets
 
 ENVS = ["DOCKER_HOST"]
 OPENAI_PREFIXES = ["gpt-", "o3", "o4"]
@@ -187,10 +188,16 @@ def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
     task_dir = tmp_input_dir / "workspace"
     task_dir.mkdir()
     
-    prepare_task_asssets(
+    parsed = urlparse(task_args.server)
+    host_ip = parsed.hostname or "localhost"
+    host_port = parsed.port or 8000
+
+    prepare_task_assets(
         arvo_id=task_args.arvo_id,
-        workspace_path=task_dir,
-        cache_path=task_args.cache_path,
+        workspace_path=str(task_dir),
+        cache_path=str(task_args.cache_path),
+        host_ip=host_ip,
+        host_port=host_port,
     )
     
     # 3. Create shared directory for submissions

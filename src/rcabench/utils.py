@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from rcabench import CODEBASE_FILE_NAME, CACHE_DIR, DATA_DIR, AGENT_WORKSPACE_DIR
+from rcabench import CODEBASE_FILE_NAME, DEFAULT_CACHE_DIR, DEFAULT_DATA_DIR, DEFAULT_WORKSPACE_DIR
 
 BASE_REPO_URL = (
     "https://huggingface.co/datasets/sunblaze-ucb/cybergym/resolve/main/data/arvo"
@@ -48,7 +48,7 @@ def _download_file(url: str, output_path: Path, is_text: bool, not_found_msg: st
     except Exception as e:
         raise ValueError(unexpected_msg.format(e=e))
 
-def remote_fetch_diff(arvo_id: str, output_dir: str = CACHE_DIR) -> str:
+def remote_fetch_diff(arvo_id: str, output_dir: str = DEFAULT_CACHE_DIR) -> str:
     """
     Fetches the diff file for the given arvo_id from the remote Hugging Face repository.
 
@@ -71,7 +71,7 @@ def remote_fetch_diff(arvo_id: str, output_dir: str = CACHE_DIR) -> str:
     
     return str(output_path)
 
-def remote_fetch_error(arvo_id: str, output_dir: str = CACHE_DIR) -> str:
+def remote_fetch_error(arvo_id: str, output_dir: str = DEFAULT_CACHE_DIR) -> str:
     """
     Fetches the error file for the given arvo_id from the remote Hugging Face repository.
 
@@ -94,7 +94,7 @@ def remote_fetch_error(arvo_id: str, output_dir: str = CACHE_DIR) -> str:
     
     return str(output_path)
 
-def remote_fetch_codebase(arvo_id: str, output_dir: str = AGENT_WORKSPACE_DIR) -> str:
+def remote_fetch_codebase(arvo_id: str, output_dir: str = DEFAULT_WORKSPACE_DIR) -> str:
     """
     Fetches the codebase file for the given arvo_id from the remote Hugging Face repository.
 
