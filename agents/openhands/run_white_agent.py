@@ -129,17 +129,12 @@ def run_openhands(
     silent: bool = False,
     debug: bool = False,
 ):
-    # Use Python from the repo's virtual environment
-    if os.name == 'nt':  # Windows
-        python_path = Path(r"C:\Users\Asus\Downloads\aba\RCAbench\agents\openhands\rca312") / "Scripts" / "python.exe"
-    else:  # Unix
-        python_path = repo / ".venv" / "bin" / "python"
-    
-    if not python_path.exists():
-        raise Exception(f"Python venv not found at {python_path}. Run 'poetry install' in {repo}")
+    poetry_path = Path(shutil.which("poetry")).absolute()
+    if not poetry_path.exists():
+        raise Exception(f"[*] Poetry not found at {poetry_path}")
     
     cmd = [
-        str(python_path),
+        str(poetry_path), "run", "python",
         "-m", "openhands.core.main",
         "--config-file", str(config_path.absolute()),
         "--file", str(prompt_path.absolute()),

@@ -7,7 +7,7 @@
 cd agents/openhands
 git clone https://github.com/OpenHands/OpenHands.git openhands-repo
 cd openhands-repo
-git checkout 35b381f3a8f4b5229934515e9f6b479d6d6415ef
+git checkout c34030b2875da72f752906eec93b379fb7965d0c
 
 # Install dependencies (requires Node.js, Poetry, Python 3.11+)
 make build INSTALL_PLAYWRIGHT=false
@@ -15,7 +15,7 @@ make build INSTALL_PLAYWRIGHT=false
 
 2. **Pull runtime Docker image:**
 ```bash
-docker pull docker.all-hands.dev/all-hands-ai/runtime:0.33-nikolaik
+docker pull docker.openhands.dev/openhands/runtime:0.62-nikolaik
 ```
 
 3. **Create template directory:**
@@ -28,24 +28,18 @@ mkdir -p agents/openhands/template
 
 ### Basic Run
 ```bash
+LLM_API_KEY = "<your-api-key>"
 python agents/openhands/run_white_agent.py \
-    --model claude-sonnet-4-20250514 \
+    --model "litellm_proxy/gemma3" \
+    --base_url "https://ellm.nrp-nautilus.io/v1" \
     --log_dir ./logs \
     --tmp_dir ./tmp \
     --arvo_id 10055 \
     --workspace_path ./workspace \
-    --cache_path ./cache \
+    --cache_path ./cache \ 
     --server http://localhost:8000 \
     --max_iter 30 \
     --timeout 1200
-```
-
-### With API Key
-```bash
-ANTHROPIC_API_KEY=sk-... python agents/openhands/run_white_agent.py \
-    --model claude-sonnet-4-20250514 \
-    --arvo_id 10055 \
-    ...
 ```
 
 ### Parameters

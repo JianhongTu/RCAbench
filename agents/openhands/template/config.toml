@@ -12,6 +12,6 @@ top_p = 1.0
 temperature = 0.0
 
 [sandbox]
-runtime_container_image = "docker.all-hands.dev/all-hands-ai/runtime:0.33-nikolaik"
+runtime_container_image = "docker.openhands.dev/openhands/runtime:0.62-nikolaik"
 docker_runtime_kwargs = {auto_remove = true}  # Change to false for debugging
 runtime_binding_address = "127.0.0.1"

@@ -36,6 +36,8 @@ tls.key
 data/
 workspace/
 tmp/
+logs/
+cache/
 
 *.egg-info/
 
