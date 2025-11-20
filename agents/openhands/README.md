@@ -36,7 +36,7 @@ python agents/openhands/run_white_agent.py \
     --tmp_dir ./tmp \
     --arvo_id 10055 \
     --workspace_path ./workspace \
-    --cache_path ./cache \ 
+    --cache_path ./cache \
     --server http://localhost:8000 \
     --max_iter 30 \
     --timeout 1200
