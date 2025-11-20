@@ -248,3 +248,47 @@ python tests/test_evaluation.py
 2. Ensure the task exists in `data/arvo.db`
 3. Verify assets are available in the remote repository
 4. Test with `prepare_task_asssets()`
+
+---
+
+## Validating ARVO Tasks
+
+### Quick Test (Single Task)
+
+```bash
+# Test validation pipeline on task 10055
+python3 scripts/validate_tasks.py --single 10055
+python3 scripts/docker_validator.py 10055 tmp/validation/10055_patch.diff
+```
+
+### Validate All Tasks
+
+```bash
+# Fast: Validate 1000 tasks without Docker (~1 hour)
+python3 scripts/run_full_pipeline.py --skip-docker
+```
+
+**Outputs** (saved to `data/pipeline_results/`):
+- `validation_report.json` - Complete validation results with metrics
+- `tier1_tasks.txt` - Gold tier: Fully validated with Docker
+- `tier2_tasks.txt` - Silver tier: Patch applies, Docker available
+- `tier3_tasks.txt` - Bronze tier: Patch applies, no Docker
+- `easy_tasks.txt` - Single file, ≤20 line changes
+- `medium_tasks.txt` - 1-2 files, 20-100 line changes
+- `hard_tasks.txt` - 3+ files or >100 line changes
+
+### Quality Tiers
+
+- **Tier 1 (Gold)**: Patch applies, compiles, and fixes vulnerability (Docker-validated)
+- **Tier 2 (Silver)**: Patch applies, Docker image available (not fully tested)
+- **Tier 3 (Bronze)**: Patch applies, no Docker image
+
+### Troubleshooting
+
+```bash
+# Test Docker connection
+python3 scripts/test_docker_connection.py
+
+# Clean up cache
+rm -rf tmp/validation/
+```
