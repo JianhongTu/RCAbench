@@ -1,0 +1,12 @@
+openhands-repo/
+rca312/
+venv312/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.log
+*.db
+.env
