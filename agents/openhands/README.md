@@ -36,7 +36,7 @@ python agents/openhands/run_white_agent.py \
     --tmp_dir ./tmp \
     --arvo_id 10055 \
     --workspace_path ./workspace \
-    --cache_path ./cache \ 
+    --cache_path ./cache \
     --server http://localhost:8000 \
     --max_iter 30 \
     --timeout 1200
@@ -54,7 +54,7 @@ python agents/openhands/run_white_agent.py \
 ## Integration with RCAbench Server
 
 The agent automatically:
-1. Prepares task assets using `prepare_task_asssets()`
+1. Prepares task assets using `prepare_task_assets()`
 2. Creates workspace with vulnerable code + crash report
 3. Runs OpenHands with localization prompt
 4. Outputs to `/workspace/shared/loc.json` and optionally `patch.diff`

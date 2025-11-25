@@ -3,18 +3,22 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+from urllib.parse import urlparse
 
 import docker
 import docker.errors
+from openhands.controller import agent
 import tomli_w
 from simple_parsing import ArgumentGenerationMode, ArgumentParser, flag
 
-from rcabench.task.gen_task import prepare_task_asssets
+from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
 
 ENVS = ["DOCKER_HOST"]
 OPENAI_PREFIXES = ["gpt-", "o3", "o4"]
@@ -26,11 +30,13 @@ logger = logging.getLogger(__name__)
 
 class OpenHandsError(Exception):
     """Base class for OpenHands errors"""
+
     pass
 
 
 class OpenHandsTimeoutError(OpenHandsError):
     """Exception raised when OpenHands times out"""
+
     pass
 
 
@@ -62,13 +68,10 @@ class OpenhandsArgs:
 class TaskArgs:
     arvo_id: str
     """ARVO task ID (e.g., '10055')"""
-    
-    workspace_path: Path
-    """Path to workspace directory"""
-    
+
     cache_path: Path
     """Path to cache directory"""
-    
+
     server: str
     """Server address for patch validation"""
 
@@ -80,7 +83,7 @@ def get_api_key(model: str):
         env_var = "ANTHROPIC_API_KEY"
     else:
         env_var = "LLM_API_KEY"
-    
+
     api_key = os.getenv(env_var)
     return api_key if api_key else "EMPTY"
 
@@ -97,8 +100,10 @@ def _cleanup_docker_container(log_dir: Path):
     log_files = list(log_dir.glob("*.log"))
     if not log_files:
         return
-    
-    pat = re.compile(r"runtime ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16})")
+
+    pat = re.compile(
+        r"runtime ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16})"
+    )
     with open(log_files[0]) as f:
         for line in f:
             match = pat.search(line)
@@ -107,7 +112,7 @@ def _cleanup_docker_container(log_dir: Path):
                 break
         else:
             return
-    
+
     client = docker.from_env()
     try:
         container = client.containers.get(f"openhands-runtime-{container_id}")
@@ -132,27 +137,33 @@ def run_openhands(
     poetry_path = Path(shutil.which("poetry")).absolute()
     if not poetry_path.exists():
         raise Exception(f"[*] Poetry not found at {poetry_path}")
-    
+
     cmd = [
-        str(poetry_path), "run", "python",
-        "-m", "openhands.core.main",
-        "--config-file", str(config_path.absolute()),
-        "--file", str(prompt_path.absolute()),
-        "--max-iterations", str(max_iter),
+        str(poetry_path),
+        "run",
+        "python",
+        "-m",
+        "openhands.core.main",
+        "--config-file",
+        str(config_path.absolute()),
+        "--file",
+        str(prompt_path.absolute()),
+        "--max-iterations",
+        str(max_iter),
     ]
-    
+
     env = os.environ.copy()  # Copy all env vars
     for env_var in ENVS:
         if os.getenv(env_var) is not None:
             env[env_var] = os.getenv(env_var)
-    
+
     env["LLM_API_KEY"] = llm_api_key or get_api_key(model)
     env["LOG_TO_FILE"] = "1"
     env["LOG_DIR"] = str(log_dir.absolute())
     if debug:
         env["DEBUG"] = "1"
     env["LOG_ALL_EVENTS"] = "1"
-    
+
     logger.info(f"Running OpenHands: {shlex.join(cmd)}")
     logger.info(f"Working directory: {repo}")
     try:
@@ -171,83 +182,137 @@ def run_openhands(
         _cleanup_docker_container(log_dir)
 
 
+def force_remove_dir(dir_path: Path):
+    """Force remove a directory by changing permissions recursively."""
+    if not dir_path.exists():
+        return
+
+    try:
+        # Change permissions recursively to allow deletion
+        for root, dirs, files in os.walk(str(dir_path)):
+            for d in dirs:
+                os.chmod(os.path.join(root, d), 0o755)
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o644)
+
+        # Now remove the directory
+        shutil.rmtree(dir_path)
+        logger.info(f"Successfully removed directory: {dir_path}")
+    except Exception as e:
+        logger.warning(f"Failed to remove directory {dir_path}: {e}")
+        # Try with ignore_errors as fallback
+        try:
+            shutil.rmtree(dir_path, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def run_with_configs(openhands_args: OpenhandsArgs, task_args: TaskArgs):
-    openhands_args.tmp_dir.mkdir(parents=True, exist_ok=True)
+    # Create unique sub-directory for logs
     openhands_args.log_dir.mkdir(parents=True, exist_ok=True)
-    
-    agent_id = uuid4().hex
-    sub_dir = f"arvo_{task_args.arvo_id}-{agent_id}"
-    tmp_input_dir = openhands_args.tmp_dir / sub_dir
-    tmp_input_dir.mkdir()
-    
-    # 1. Copy template
-    shutil.copytree(SCRIPT_DIR / "template", tmp_input_dir / "template")
-    
-    # 2. Prepare task assets
-    task_dir = tmp_input_dir / "workspace"
-    task_dir.mkdir()
-    
-    prepare_task_asssets(
+
+    # Prepare task assets (Safe)
+    parsed = urlparse(task_args.server)
+    host_ip = parsed.hostname or "localhost"
+    host_port = parsed.port or 8000
+
+    task_meta = prepare_task_assets(
         arvo_id=task_args.arvo_id,
-        workspace_path=task_dir,
-        cache_path=task_args.cache_path,
+        tmp_dir=openhands_args.tmp_dir,
+        host_ip=host_ip,
+        host_port=host_port,
     )
-    
-    # 3. Create shared directory for submissions
-    shared_dir = task_args.workspace_path / "shared"
-    shared_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 4. Setup log directory
-    log_dir = openhands_args.log_dir / sub_dir
-    log_dir.mkdir()
-    
-    # 5. Configure OpenHands
-    config_path = tmp_input_dir / "template" / "config.toml"
-    with open(config_path) as f:
-        config = tomllib.loads(f.read())
-    
-    config["core"]["workspace_base"] = str(task_dir.absolute()).replace('\\', '/')
-    config["core"]["cache_dir"] = str((log_dir / "cache").absolute()).replace('\\', '/')
-    config["core"]["file_store_path"] = str((log_dir / "file").absolute()).replace('\\', '/')
-    config["core"]["save_trajectory_path"] = str((log_dir / "trajectory").absolute()).replace('\\', '/')
-    config["llm"]["model"] = model_map(openhands_args.llm.model)
-    config["llm"]["top_p"] = openhands_args.llm.top_p
-    config["llm"]["temperature"] = openhands_args.llm.temperature
-    config["llm"]["base_url"] = openhands_args.llm.base_url
-    config["llm"]["max_output_tokens"] = openhands_args.llm.max_output_tokens
-    
-    if openhands_args.llm.seed is not None:
-        config["llm"]["seed"] = openhands_args.llm.seed
-    
-    with open(config_path, "w") as f:
-        f.write(tomli_w.dumps(config))
-    
-    # 6. Run OpenHands
-    run_openhands(
-        config_path=config_path,
-        prompt_path=tmp_input_dir / "template" / "prompt.txt",
-        log_dir=log_dir / "logs",
-        timeout=openhands_args.timeout,
-        repo=openhands_args.repo,
-        silent=openhands_args.silent,
-        max_iter=openhands_args.max_iter,
-        model=openhands_args.llm.model,
-        llm_api_key=openhands_args.llm.api_key,
-        debug=openhands_args.debug,
-    )
-    
-    # 7. Cleanup
-    if openhands_args.remove_tmp:
-        shutil.rmtree(tmp_input_dir, ignore_errors=True)
-    
-    return agent_id
+
+    # Variable to store agent paths for cleanup
+    agent_paths = task_meta["agent_paths"]
+    agent_dir = agent_paths.agent_dir
+
+    def cleanup_handler(signum, frame):
+        """Signal handler for cleanup on SIGTERM"""
+        logger.info(f"Received signal {signum}, cleaning up...")
+        if agent_paths:
+            cleanup_task_assets(agent_paths)
+        force_remove_dir(agent_dir)
+        sys.exit(1)
+
+    # Register signal handler for SIGTERM
+    signal.signal(signal.SIGTERM, cleanup_handler)
+
+    try:
+        # 1. Copy template
+        shutil.copytree(SCRIPT_DIR / "template", agent_dir / "template")
+
+        # Use the workspace created by prepare_task_assets
+        task_dir = agent_paths.workspace_dir
+
+        # 3. Create shared directory for submissions
+        shared_dir = agent_paths.shared_dir
+
+        # 4. Setup log directory
+        log_dir = (
+            openhands_args.log_dir
+            / f"arvo_{agent_paths.arvo_id}_{agent_paths.agent_id}"
+        )
+        log_dir.mkdir()
+
+        # 5. Configure OpenHands
+        config_path = agent_dir / "template" / "config.toml"
+        with open(config_path) as f:
+            config = tomllib.loads(f.read())
+
+        config["core"]["workspace_base"] = str(task_dir.absolute()).replace(
+            "\\", "/"
+        )  # windows quirk
+        config["core"]["cache_dir"] = str((log_dir / "cache").absolute()).replace(
+            "\\", "/"
+        )
+        config["core"]["file_store_path"] = str((log_dir / "file").absolute()).replace(
+            "\\", "/"
+        )
+        config["core"]["save_trajectory_path"] = str(
+            (log_dir / "trajectory").absolute()
+        ).replace("\\", "/")
+        config["llm"]["model"] = model_map(openhands_args.llm.model)
+        config["llm"]["top_p"] = openhands_args.llm.top_p
+        config["llm"]["temperature"] = openhands_args.llm.temperature
+        config["llm"]["base_url"] = openhands_args.llm.base_url
+        config["llm"]["max_output_tokens"] = openhands_args.llm.max_output_tokens
+
+        if openhands_args.llm.seed is not None:
+            config["llm"]["seed"] = openhands_args.llm.seed
+
+        with open(config_path, "w") as f:
+            f.write(tomli_w.dumps(config))
+
+        # 6. Run OpenHands
+        run_openhands(
+            config_path=config_path,
+            prompt_path=agent_dir / "template" / "prompt.txt",
+            log_dir=log_dir / "logs",
+            timeout=openhands_args.timeout,
+            repo=openhands_args.repo,
+            silent=openhands_args.silent,
+            max_iter=openhands_args.max_iter,
+            model=openhands_args.llm.model,
+            llm_api_key=openhands_args.llm.api_key,
+            debug=openhands_args.debug,
+        )
+
+    finally:
+        # Cleanup agent assets and tmp directory
+        if openhands_args.remove_tmp:
+            if agent_paths:
+                cleanup_task_assets(agent_paths)
+            force_remove_dir(agent_dir)
+
+    return agent_paths.agent_id
 
 
 def main(raw_args=None):
     parser = ArgumentParser(argument_generation_mode=ArgumentGenerationMode.BOTH)
     parser.add_arguments(OpenhandsArgs, dest="openhands_args")
     parser.add_arguments(TaskArgs, dest="task_args")
-    
+
     args = parser.parse_args(raw_args)
     run_with_configs(args.openhands_args, args.task_args)
 

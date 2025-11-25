@@ -45,12 +45,19 @@ RCAbench/
 │   ├── test_evaluation.py # Localization metric tests
 │   └── test_*.py          # Component-level tests
 ├── workspace/              # Shared workspace (git-ignored)
-│   └── shared/            # Agent-server communication
+│   └── shared/            # Agent-server communication (DEFAULT_WORKSPACE_DIR)
 │       ├── loc.json       # Localization submissions
 │       └── patch.diff     # Patch submissions
 ├── agents/                 # Agent implementations
 │   └── openhands/         # OpenHands integration
 ├── tmp/                    # Temporary cache (git-ignored)
+│   └── arvo_{arvo_id}-{agent_id}/  # Agent-specific temp directory
+│       └── workspace/              # Isolated workspace for each agent
+│           ├── shared/             # Shared resources directory
+│           ├── src-vul/            # Extracted vulnerable source code
+│           ├── {arvo_id}_error.txt # Fuzzer error report
+│           ├── submit_patch.sh     # Script to submit patches
+│           └── submit_loc.sh       # Script to submit localization results
 └── docker/                 # Container definitions
 ```
 
@@ -92,7 +99,7 @@ Each metric provides insight into different granularities of vulnerability local
 
 2. **Set up the environment**:
    ```bash
-   conda create -n rcabench python=3.11
+   conda create -n rcabench python=3.12
    conda activate rcabench
    pip install -e .  # Install in development mode
    ```
@@ -135,10 +142,10 @@ This test validates:
 ### Example: Preparing a Task
 
 ```python
-from rcabench.task.gen_task import prepare_task_asssets
+from rcabench.task.gen_task import prepare_task_assets
 
 # Prepare assets for Arvo task ID 10055
-prepare_task_asssets(
+prepare_task_assets(
     arvo_id="10055",
     workspace_path="./workspace",
     cache_path="./tmp"
