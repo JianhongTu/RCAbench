@@ -1,0 +1,94 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rcabench-pipeline-${TAG}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+
+      initContainers:
+      # Clone the repository and setup task list
+      - name: git-clone
+        image: alpine/git:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - >-
+            echo "Cloning repository..." &&
+            git clone https://github.com/JianhongTu/RCAbench.git /workspace/rcabench &&
+            cd /workspace/rcabench &&
+            echo "Checking out dataset-curation branch..." &&
+            git checkout dataset-curation || git checkout main || git checkout master &&
+            echo "Verifying scripts directory exists..." &&
+            ls -la scripts/ || (echo "ERROR: scripts directory not found!" && exit 1) &&
+            echo "Creating task list..." &&
+            mkdir -p /workspace/rcabench/data &&
+            echo "10055" > /workspace/rcabench/data/available_tasks.txt &&
+            echo "Setup complete!";
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+
+      containers:
+      - name: rcabench-pipeline
+        image: python:3.11-slim
+        workingDir: /workspace/rcabench
+
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+            ephemeral-storage: "20Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            ephemeral-storage: "50Gi"
+
+        command: ["/bin/bash", "-c"]
+        args:
+          - >-
+            set -e &&
+            echo "Installing system dependencies..." &&
+            apt-get update -qq && apt-get install -y -qq patch > /dev/null 2>&1 &&
+            echo "Installing Python dependencies..." &&
+            pip install -q --no-cache-dir -r requirements.txt &&
+            pip install -q --no-cache-dir -e . &&
+            echo "Starting validation..." &&
+            python3 scripts/validate.py 10055 --skip-docker &&
+            echo "" &&
+            echo "Validation completed! Results saved to: tmp/validation/10055_result.json" &&
+            echo "Summary of results:" &&
+            cat tmp/validation/10055_result.json | python3 -m json.tool &&
+            echo "" &&
+            echo "Copying results to persistent volume..." &&
+            mkdir -p /results/${TAG} &&
+            cp -r /workspace/rcabench/tmp/validation /results/${TAG}/ &&
+            echo "✅ Results copied to persistent volume: /results/${TAG}/validation" &&
+            echo "Results are now available in PVC and will persist after pod termination." &&
+            echo "Exiting...";
+
+        env:
+          - name: PYTHONUNBUFFERED
+            value: "1"
+
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+          - name: results-pvc
+            mountPath: /results
+
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: results-pvc
+          persistentVolumeClaim:
+            claimName: gaurs-storage
+
+      tolerations:
+        - key: "nautilus.io/chase-ci"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+

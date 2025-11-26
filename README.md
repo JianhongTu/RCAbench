@@ -83,9 +83,10 @@ Each metric provides insight into different granularities of vulnerability local
 ## Prerequisites
 
 - Python 3.11+
-- Docker (with Docker daemon running)
+- Docker (with Docker daemon running) - for local validation
 - Conda (recommended for environment management)
 - 10GB+ disk space for task assets
+- Kubernetes cluster access (for running jobs on NRP/Nautilus) - optional
 
 ## Quick Start
 
@@ -287,79 +288,146 @@ python3 scripts/validate.py --all --sample 20
 
 ---
 
-## Patch Verification
+## Running on Kubernetes (NRP/Nautilus)
 
-RCAbench includes automated patch verification that tests whether submitted `patch.diff` files actually fix vulnerabilities. The verification process runs in isolated Docker containers and performs three sequential checks:
+RCAbench can be run on Kubernetes clusters (e.g., NRP/Nautilus) for distributed validation tasks. The system builds from source directly in the cluster, eliminating the need to build and push Docker images.
 
-1. **Apply Patch**: Apply the `patch.diff` to the vulnerable codebase
-2. **Compile**: Run `arvo compile` to ensure the code compiles successfully
-3. **Run Fuzzer**: Execute `arvo` (the fuzzer) and verify it returns exit code 0 (no crash)
+### Prerequisites
 
-### Local Verification (Development)
+- `kubectl` configured with cluster access
+- Kubernetes namespace with appropriate permissions
+- PersistentVolumeClaim (PVC) for storing results (default: `gaurs-storage`)
 
-For development and testing, use the local verification script:
+### Quick Start
 
-```bash
-# Single task
-python3 scripts/local_patch_verification.py --task-id 10055
+1. **Submit a validation job**:
+   ```bash
+   # Submit with auto-generated tag
+   ./scripts/submit_nrp_job.sh
+   
+   # Submit with custom tag
+   ./scripts/submit_nrp_job.sh my-test-run
+   
+   # Submit with custom repository URL
+   ./scripts/submit_nrp_job.sh my-test-run https://github.com/your-username/RCAbench.git
+   
+   # Submit with custom namespace and PVC
+   ./scripts/submit_nrp_job.sh my-test-run https://github.com/JianhongTu/RCAbench.git wang-research-lab gaurs-storage
+   ```
 
-# Batch verification (sequential)
-python3 scripts/local_patch_verification.py --task-list data/verified_jobs.json
+2. **Monitor the job**:
+   ```bash
+   # Check job status
+   kubectl get jobs -n <namespace>
+   
+   # Watch logs in real-time
+   kubectl logs -f job/rcabench-pipeline-<TAG> -n <namespace>
+   
+   # Check pod status
+   kubectl get pods -n <namespace> | grep rcabench-pipeline
+   ```
 
-# Parallel verification (2 workers)
-python3 scripts/local_patch_verification.py --task-list data/verified_jobs.json --max-parallel 2
+3. **Results are automatically copied**:
+   - The script waits for job completion
+   - Results are stored in a PVC during execution (at `/results/<TAG>/validation/`)
+   - **Why a temporary pod?** `kubectl cp` only works on Running pods, but job pods complete and enter `Succeeded` state. A temporary pod mounts the same PVC and copies results to your local `./results/<TAG>/validation/` directory
+   - Results include: `*_result.json`, `*_patch.diff`, `*_error.txt`
+
+### How It Works
+
+The Kubernetes job uses a two-container approach:
+
+1. **Init Container** (`git-clone`):
+   - Clones the RCAbench repository from GitHub
+   - Checks out the specified branch (default: `dataset-curation`)
+   - Creates the task list file (`data/available_tasks.txt`)
+
+2. **Main Container** (`rcabench-pipeline`):
+   - Installs system dependencies (patch utility)
+   - Installs Python dependencies from `requirements.txt`
+   - Installs RCAbench package in development mode
+   - Runs validation for the specified task(s) **with `--skip-docker` flag**
+   - Copies results to the mounted PVC at `/results/<TAG>/validation/`
+
+### Validation Limitations in Kubernetes
+
+**Important**: The Kubernetes job runs validation with the `--skip-docker` flag, which means it only performs **Stage 1** and **Stage 2** validation:
+
+- ✅ **Stage 1 (Asset Validation)**: Downloads patch, error report, and codebase. Tests if patch CAN be applied (dry-run only).
+- ✅ **Stage 2 (Docker Check)**: Verifies if Docker image exists on Docker Hub.
+- ❌ **Stage 3 (Docker Validation)**: **SKIPPED** - This is where actual patch application, compilation, and fuzzer execution happen.
+
+**Why these limitations exist:**
+
+1. **Docker is not available**:
+   - The pod uses `python:3.11-slim` base image, which doesn't include Docker daemon
+   - Installing Docker-in-Docker (DinD) requires privileged containers
+   - Kubernetes cluster policy blocks privileged containers: `Privileged container is not allowed`
+   - Docker validation requires the `docker` Python library and a running Docker daemon
+
+2. **Patch is not actually applied**:
+   - Stage 1 only performs a `--dry-run` test to check if the patch CAN be applied
+   - Actual patch application happens in Stage 3 (Docker validation) inside the Docker container
+   - Since Docker validation is skipped, patches are never actually applied to the codebase
+
+3. **Fuzzer-poc is not running**:
+   - The fuzzer (`arvo` command) only runs in Stage 3 inside the Docker container
+   - The Docker container contains the vulnerable codebase, build environment, and fuzzer setup
+   - Since Docker validation is skipped, the fuzzer never executes
+
+**What the Kubernetes job DOES validate:**
+- ✅ Assets are downloadable (patch, error report, codebase)
+- ✅ Patch format is correct and can theoretically be applied
+- ✅ Docker image exists for the task (but not used)
+- ✅ Task metadata and difficulty classification
+
+**To run full validation (with Docker, patch application, and fuzzer):**
+- Run `validate.py` locally with Docker installed: `python3 scripts/validate.py 10055` (without `--skip-docker`)
+- Or use the evaluation server which has Docker access
+
+### Customizing Tasks
+
+Edit `k8s/rcabench-pipeline-job-build.yml` to change which tasks are validated:
+
+```yaml
+# Single task (line 28)
+echo "10055" > /workspace/rcabench/data/available_tasks.txt
+
+# Multiple tasks
+echo -e "10055\n10096\n10123" > /workspace/rcabench/data/available_tasks.txt
 ```
 
-### Kubernetes Batch Verification (Production)
+### Job Manifest
 
-For large-scale verification, use the Kubernetes batch processing:
+The job manifest (`k8s/rcabench-pipeline-job-build.yml`) includes:
 
+- **Resources**: 2-4 CPU, 4-8Gi memory, 20-50Gi ephemeral storage
+- **Tolerations**: `nautilus.io/chase-ci=true` for Nautilus cluster scheduling
+- **Volumes**: 
+  - EmptyDir for workspace (temporary)
+  - PVC for results persistence (`gaurs-storage` by default)
+- **TTL**: Jobs are automatically deleted after 24 hours
+
+### Troubleshooting
+
+**Cluster connectivity issues**:
 ```bash
-# Single task
-python3 scripts/batch_patch_verification.py --task-id 10055 --namespace default
+# Check cluster connectivity
+./scripts/check_cluster_connectivity.sh
 
-# Batch verification (parallel, default 5 concurrent jobs)
-python3 scripts/batch_patch_verification.py --task-list data/arvo_hf_task_ids.txt --namespace default
-
-# Custom parallelism and timeout
-python3 scripts/batch_patch_verification.py --task-list data/arvo_hf_task_ids.txt --max-parallel 10 --timeout 1200
-
-# Sequential processing (for debugging)
-python3 scripts/batch_patch_verification.py --task-list data/verified_jobs.json --max-parallel 1
+# Verify namespace access
+kubectl get pods -n <namespace>
 ```
 
-**Features:**
-- **Parallel Processing**: Runs up to `--max-parallel` jobs concurrently (default: 5)
-- **Async Monitoring**: Efficiently monitors multiple jobs without blocking
-- **Automatic Retries**: Failed jobs are retried up to 3 times
-- **Progress Tracking**: Real-time progress updates
-- **Resource Management**: Respects Kubernetes cluster capacity
+**Job not scheduling**:
+- Ensure your namespace has the correct tolerations
+- Check resource quotas: `kubectl describe quota -n <namespace>`
 
-**Kubernetes Job Template**: `k8s/patch-verification-job.yaml`
+**Results not copying**:
+- Verify PVC exists: `kubectl get pvc -n <namespace>`
+- Check PVC pod logs: `kubectl logs pvc-copy-<TAG>-<ID> -n <namespace>`
+- Manually check PVC contents: Create a pod with PVC mount and inspect `/results/`
 
-### Results Analysis
-
-Analyze verification results and generate reports:
-
-```bash
-python3 scripts/analyze_patch_verification_results.py
-```
-
-**Outputs**:
-- Console report with success rates and failure breakdown
-- `data/patch_verification_detailed_report.json` - Detailed statistics
-- `data/patch_verification_results/{task_id}_result.json` - Individual task results
-
-### Database Storage
-
-Results are stored in `data/patch_verification.db` with the following schema:
-
-- `task_id`: Task identifier
-- `status`: 'pending', 'running', 'success', 'failed'
-- `patch_applied`: Whether patch applied successfully
-- `compiled`: Whether code compiled after patching
-- `fuzzer_passed`: Whether fuzzer returned exit code 0
-- `error_message`: Error details if failed
-- `k8s_job_name`: Kubernetes job name (for k8s verification)
-- `start_time/end_time`: Execution timestamps
-- `retry_count`: Number of retry attempts
+**Authentication errors**:
+- Ensure `kubectl` is properly configured: `kubectl config current-context`
+- For OIDC authentication issues, check certificate trust in macOS Keychain Access
