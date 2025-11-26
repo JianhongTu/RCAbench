@@ -6,24 +6,32 @@ RCAbench can be run on Kubernetes clusters (e.g., NRP/Nautilus) for distributed 
 
 - `kubectl` configured with cluster access
 - Kubernetes namespace with appropriate permissions
-- PersistentVolumeClaim (PVC) for storing results (default: `gaurs-storage`)
+- **PersistentVolumeClaim (PVC)** for storing results
+  - Default: `gaurs-storage` (auto-detected if not specified)
+  - **You should specify your PVC name** if it's different from the default
+  - The script will attempt to auto-detect a PVC if the default doesn't exist
 
 ## Quick Start
 
 1. **Submit a validation job**:
+   
+   **Script arguments (in order):**
+   - `TAG` (optional): Job tag/name (defaults to timestamp)
+   - `REPO_URL` (optional): GitHub repository URL (defaults to JianhongTu/RCAbench)
+   - `NAMESPACE` (optional): Kubernetes namespace (auto-detected from kubeconfig)
+   - `PVC_NAME` (optional): PersistentVolumeClaim name (defaults to `gaurs-storage`)
+   
    ```bash
-   # Submit with auto-generated tag
+   # Simplest: auto-generated tag, default repo, auto-detected namespace, default PVC
    ./scripts/submit_nrp_job.sh
    
-   # Submit with custom tag
-   ./scripts/submit_nrp_job.sh my-test-run
    
-   # Submit with custom repository URL
-   ./scripts/submit_nrp_job.sh my-test-run https://github.com/your-username/RCAbench.git
+   # Full specification: tag, repo, namespace, and PVC (RECOMMENDED if your PVC differs)
+   ./scripts/submit_nrp_job.sh my-test-run https://github.com/JianhongTu/RCAbench.git wang-research-lab your-pvc-name
    
-   # Submit with custom namespace and PVC
-   ./scripts/submit_nrp_job.sh my-test-run https://github.com/JianhongTu/RCAbench.git wang-research-lab gaurs-storage
    ```
+   
+   **Note**: To specify your PVC name, you must provide all previous arguments (tag, repo, namespace). The script defaults to `gaurs-storage` and will try to auto-detect a PVC if that doesn't exist, but **explicitly specifying your PVC name is recommended** for reliability.
 
 2. **Monitor the job**:
    ```bash
