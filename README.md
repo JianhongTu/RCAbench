@@ -284,3 +284,82 @@ python3 scripts/validate.py --all --sample 20
 - `tier2_tasks.txt` - Docker available (not fully tested)
 - `tier3_tasks.txt` - No Docker image
 - `easy/medium/hard_tasks.txt` - By difficulty
+
+---
+
+## Patch Verification
+
+RCAbench includes automated patch verification that tests whether submitted `patch.diff` files actually fix vulnerabilities. The verification process runs in isolated Docker containers and performs three sequential checks:
+
+1. **Apply Patch**: Apply the `patch.diff` to the vulnerable codebase
+2. **Compile**: Run `arvo compile` to ensure the code compiles successfully
+3. **Run Fuzzer**: Execute `arvo` (the fuzzer) and verify it returns exit code 0 (no crash)
+
+### Local Verification (Development)
+
+For development and testing, use the local verification script:
+
+```bash
+# Single task
+python3 scripts/local_patch_verification.py --task-id 10055
+
+# Batch verification (sequential)
+python3 scripts/local_patch_verification.py --task-list data/verified_jobs.json
+
+# Parallel verification (2 workers)
+python3 scripts/local_patch_verification.py --task-list data/verified_jobs.json --max-parallel 2
+```
+
+### Kubernetes Batch Verification (Production)
+
+For large-scale verification, use the Kubernetes batch processing:
+
+```bash
+# Single task
+python3 scripts/batch_patch_verification.py --task-id 10055 --namespace default
+
+# Batch verification (parallel, default 5 concurrent jobs)
+python3 scripts/batch_patch_verification.py --task-list data/arvo_hf_task_ids.txt --namespace default
+
+# Custom parallelism and timeout
+python3 scripts/batch_patch_verification.py --task-list data/arvo_hf_task_ids.txt --max-parallel 10 --timeout 1200
+
+# Sequential processing (for debugging)
+python3 scripts/batch_patch_verification.py --task-list data/verified_jobs.json --max-parallel 1
+```
+
+**Features:**
+- **Parallel Processing**: Runs up to `--max-parallel` jobs concurrently (default: 5)
+- **Async Monitoring**: Efficiently monitors multiple jobs without blocking
+- **Automatic Retries**: Failed jobs are retried up to 3 times
+- **Progress Tracking**: Real-time progress updates
+- **Resource Management**: Respects Kubernetes cluster capacity
+
+**Kubernetes Job Template**: `k8s/patch-verification-job.yaml`
+
+### Results Analysis
+
+Analyze verification results and generate reports:
+
+```bash
+python3 scripts/analyze_patch_verification_results.py
+```
+
+**Outputs**:
+- Console report with success rates and failure breakdown
+- `data/patch_verification_detailed_report.json` - Detailed statistics
+- `data/patch_verification_results/{task_id}_result.json` - Individual task results
+
+### Database Storage
+
+Results are stored in `data/patch_verification.db` with the following schema:
+
+- `task_id`: Task identifier
+- `status`: 'pending', 'running', 'success', 'failed'
+- `patch_applied`: Whether patch applied successfully
+- `compiled`: Whether code compiled after patching
+- `fuzzer_passed`: Whether fuzzer returned exit code 0
+- `error_message`: Error details if failed
+- `k8s_job_name`: Kubernetes job name (for k8s verification)
+- `start_time/end_time`: Execution timestamps
+- `retry_count`: Number of retry attempts
