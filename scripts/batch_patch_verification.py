@@ -657,7 +657,7 @@ def main():
         # Batch verification
         task_ids = load_task_list(args.task_list)
         print(f"Loaded {len(task_ids)} tasks for verification")
-        
+
         # Apply sampling if requested
         if args.sample and args.sample < len(task_ids):
             task_ids = random.sample(task_ids, args.sample)
