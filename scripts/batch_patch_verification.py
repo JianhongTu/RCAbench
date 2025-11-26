@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 import tempfile
@@ -632,6 +633,9 @@ def main():
         help="Allow partial patch failures and continue with compilation/fuzzing",
     )
     parser.add_argument(
+        "--sample", type=int, help="Randomly sample N tasks from the task list"
+    )
+    parser.add_argument(
         "--check-status", action="store_true", help="Only check status of running jobs"
     )
 
@@ -653,6 +657,11 @@ def main():
         # Batch verification
         task_ids = load_task_list(args.task_list)
         print(f"Loaded {len(task_ids)} tasks for verification")
+        
+        # Apply sampling if requested
+        if args.sample and args.sample < len(task_ids):
+            task_ids = random.sample(task_ids, args.sample)
+            print(f"Randomly sampled {args.sample} tasks for verification")
 
         if args.max_parallel == 1:
             # Sequential processing (original logic)
