@@ -538,7 +538,7 @@ async def submit_and_monitor_task(
 
         # Submit job
         job_name = await asyncio.get_event_loop().run_in_executor(
-            None, submit_k8s_job, task_id, namespace, timeout
+            None, submit_k8s_job, task_id, namespace, timeout, relax
         )
 
         db.insert_or_update_result(
