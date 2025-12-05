@@ -39,6 +39,7 @@ results/
 tmp/
 logs/
 cache/
+data/
 
 *.egg-info/
 

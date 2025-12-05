@@ -25,9 +25,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional
 import tempfile
-import yaml
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -105,14 +103,14 @@ spec:
           
           # Compile
           echo "Compiling..."
-          if ! arvo compile; then
+          if ! arvo compile >/dev/null 2>&1; then
             echo "COMPILE_FAILED: Compilation failed"
             exit 2
           fi
           
           # Run fuzzer with timeout
           echo "Running fuzzer..."
-          if ! timeout {timeout} arvo; then
+          if ! timeout {timeout} arvo >/dev/null 2>&1; then
             echo "FUZZER_FAILED: Fuzzer returned non-zero exit code: $?"
             exit 3
           fi
@@ -238,7 +236,7 @@ class PatchVerificationDB:
         cursor.execute(
             """
             SELECT task_id FROM patch_verification
-            WHERE status IN ('pending', 'failed') AND retry_count < 3
+            WHERE status IN ('pending', 'failed') AND retry_count < 2
         """
         )
         rows = cursor.fetchall()
@@ -349,35 +347,80 @@ def parse_job_output(logs: str) -> Dict:
         "error_message": None,
     }
 
+    # Detect relax mode from the logs (job prints RELAX_MODE when continuing after patch failure)
+    relax_mode = "RELAX_MODE" in logs
+
+    # Collect granular errors; in relax mode we will suppress patch-only errors
+    errors = []
+
+    # Fast-path: everything succeeded
     if "VERIFICATION_SUCCESS" in logs:
-        result["patch_applied"] = True
-        result["compiled"] = True
-        result["fuzzer_passed"] = True
-    elif "RELAX_MODE: Patch application failed but continuing" in logs:
+        result.update({"patch_applied": True, "compiled": True, "fuzzer_passed": True})
+        return result
+
+    # Patch-related failures
+    if "PATCH_FAILED: Failed to download patch" in logs:
+        errors.append("Failed to download patch file")
+
+    if "PATCH_FAILED: No package manager found" in logs:
+        errors.append("No package manager available for installing download tools")
+
+    if "PATCH_FAILED: Neither curl nor wget available after installation" in logs:
+        errors.append("Failed to install download tools")
+
+    # General patch application failures
+    if (
+        "PATCH_FAILED: Patch application failed with both -p1 and -p0" in logs
+        or "PATCH_FAILED: Patch application failed" in logs
+    ):
+        # mark that the patch was not applied
         result["patch_applied"] = False
-        # Continue to check if compilation succeeded
-        if "COMPILE_FAILED" not in logs:
+        # Only record this as an error in strict mode
+        if not relax_mode:
+            errors.append("Patch application failed")
+
+    # If RELAX_MODE explicit message exists, ensure patch_applied is False
+    if "RELAX_MODE" in logs:
+        result["patch_applied"] = False
+
+    # Compilation outcome
+    if "COMPILE_FAILED" in logs:
+        result["compiled"] = False
+        errors.append("Compilation failed")
+    else:
+        # If compilation step ran and there's no compile failure recorded, assume compiled succeeded
+        if "Compiling..." in logs or "arvo compile" in logs or "FUZZER_FAILED" in logs or "Running fuzzer" in logs:
             result["compiled"] = True
-        if "FUZZER_FAILED" not in logs:
+
+    # Fuzzer outcome
+    if "FUZZER_FAILED" in logs:
+        # try to capture the detailed fuzzer message if present
+        # find the line that contains FUZZER_FAILED
+        for line in logs.splitlines():
+            if "FUZZER_FAILED" in line:
+                # capture full trailing message if available
+                parts = line.split("FUZZER_FAILED:", 1)
+                msg = parts[1].strip() if len(parts) > 1 else "Fuzzer returned non-zero exit code"
+                errors.append(msg)
+                break
+        result["fuzzer_passed"] = False
+    else:
+        # If fuzzer was executed and there's no failure note, assume it passed
+        if "Running fuzzer" in logs or "arvo" in logs:
             result["fuzzer_passed"] = True
-        result["error_message"] = "Patch application failed (relax mode)"
-    elif "PATCH_FAILED: Failed to download patch" in logs:
-        result["error_message"] = "Failed to download patch file"
-    elif "PATCH_FAILED: No package manager found" in logs:
-        result["error_message"] = (
-            "No package manager available for installing download tools"
-        )
-    elif "PATCH_FAILED: Neither curl nor wget available after installation" in logs:
-        result["error_message"] = "Failed to install download tools"
-    elif "PATCH_FAILED: Patch application failed with both -p1 and -p0" in logs:
-        result["error_message"] = "Patch application failed with both -p1 and -p0"
-    elif "COMPILE_FAILED" in logs:
+
+    # If there are no errors and patch wasn't explicitly marked failed, assume patch applied
+    if not result["patch_applied"] and not any(k in logs for k in ("PATCH_FAILED", "RELAX_MODE")):
         result["patch_applied"] = True
-        result["error_message"] = "Compilation failed"
-    elif "FUZZER_FAILED" in logs:
-        result["patch_applied"] = True
-        result["compiled"] = True
-        result["error_message"] = "Fuzzer returned non-zero exit code"
+
+    # In relax mode, suppress a lone patch-application error (i.e., don't treat it as overall failure)
+    if relax_mode:
+        # remove patch-only error if that's the only error
+        errors = [e for e in errors if not e.startswith("Patch application failed")]
+
+    # Construct final error_message if any errors remain
+    if errors:
+        result["error_message"] = "; ".join(errors)
 
     return result
 
