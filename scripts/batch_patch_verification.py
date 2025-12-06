@@ -244,6 +244,57 @@ class PatchVerificationDB:
 
         return [row[0] for row in rows]
 
+    def get_successful_tasks(self) -> List[str]:
+        """Get list of tasks that have been successfully verified."""
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT task_id FROM patch_verification
+            WHERE status = 'success'
+        """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [row[0] for row in rows]
+
+    def get_tasks_exceeding_retry_limit(self) -> List[str]:
+        """Get list of tasks that have exceeded retry limit."""
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT task_id FROM patch_verification
+            WHERE retry_count >= 2
+        """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [row[0] for row in rows]
+
+    def should_skip_task(self, task_id: str) -> tuple:
+        """Check if a task should be skipped. Returns (should_skip, reason)."""
+        result = self.get_result(task_id)
+        
+        if not result:
+            return False, ""
+        
+        if result["status"] == "success":
+            return True, "already verified successfully"
+        
+        if result["retry_count"] >= 2:
+            return True, f"exceeded retry limit (retry_count={result['retry_count']})"
+        
+        return False, ""
+
 
 def submit_k8s_job(
     task_id: str, namespace: str, timeout: int = 600, relax: bool = False
@@ -437,15 +488,16 @@ def verify_single_task(
     print(f"Verifying task: {task_id}")
     print("=" * 60)
 
-    # Check if already completed
-    existing = db.get_result(task_id)
-    if existing and existing["status"] == "success":
-        print(f"Task {task_id} already verified successfully")
+    # Check if task should be skipped
+    should_skip, reason = db.should_skip_task(task_id)
+    if should_skip:
+        print(f"Task {task_id} skipped: {reason}")
         return
 
     # Submit job
     try:
         job_name = submit_k8s_job(task_id, namespace, timeout, relax)
+        existing = db.get_result(task_id)
         db.insert_or_update_result(
             task_id,
             status="running",
@@ -573,10 +625,10 @@ async def submit_and_monitor_task(
 ) -> tuple:
     """Submit a job and start monitoring it."""
     try:
-        # Check if already completed
-        existing = db.get_result(task_id)
-        if existing and existing["status"] == "success":
-            print(f"Task {task_id} already verified successfully")
+        # Check if task should be skipped
+        should_skip, reason = db.should_skip_task(task_id)
+        if should_skip:
+            print(f"Task {task_id} skipped: {reason}")
             return task_id, "skipped"
 
         # Submit job
@@ -584,6 +636,7 @@ async def submit_and_monitor_task(
             None, submit_k8s_job, task_id, namespace, timeout, relax
         )
 
+        existing = db.get_result(task_id)
         db.insert_or_update_result(
             task_id,
             status="running",
@@ -651,6 +704,31 @@ async def verify_batch_parallel(
     print(f"Batch verification completed: {completed_count} tasks processed")
 
 
+def filter_tasks(task_ids: List[str], db: PatchVerificationDB) -> List[str]:
+    """Filter task list to remove already-successful and over-retry-limit tasks."""
+    successful_tasks = set(db.get_successful_tasks())
+    over_limit_tasks = set(db.get_tasks_exceeding_retry_limit())
+    
+    filtered = []
+    skipped_success = 0
+    skipped_retry_limit = 0
+    
+    for task_id in task_ids:
+        if task_id in successful_tasks:
+            skipped_success += 1
+        elif task_id in over_limit_tasks:
+            skipped_retry_limit += 1
+        else:
+            filtered.append(task_id)
+    
+    if skipped_success > 0:
+        print(f"Filtered out {skipped_success} already-successful tasks")
+    if skipped_retry_limit > 0:
+        print(f"Filtered out {skipped_retry_limit} tasks exceeding retry limit")
+    
+    return filtered
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Batch patch verification using Kubernetes"
@@ -681,6 +759,11 @@ def main():
     parser.add_argument(
         "--check-status", action="store_true", help="Only check status of running jobs"
     )
+    parser.add_argument(
+        "--skip-filter",
+        action="store_true",
+        help="Skip upfront task filtering (check status individually instead)",
+    )
 
     args = parser.parse_args()
 
@@ -700,6 +783,10 @@ def main():
         # Batch verification
         task_ids = load_task_list(args.task_list)
         print(f"Loaded {len(task_ids)} tasks for verification")
+
+        # Apply upfront filtering unless --skip-filter is set
+        if not args.skip_filter:
+            task_ids = filter_tasks(task_ids, db)
 
         # Apply sampling if requested
         if args.sample and args.sample < len(task_ids):
