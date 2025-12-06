@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: patch-verify-{{TASK_ID}}
+  namespace: {{NAMESPACE}}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      containers:
+      - name: patch-verifier
+        image: n132/arvo:{{TASK_ID}}-vul
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Starting patch verification for task {{TASK_ID}}"
+
+          # Download patch file
+          wget -q -O /tmp/patch.diff "https://huggingface.co/datasets/sunblaze-ucb/cybergym/resolve/main/data/arvo/{{TASK_ID}}/patch.diff"
+
+          # Apply patch
+          echo "Applying patch..."
+          if ! patch -p1 --force < /tmp/patch.diff; then
+            echo "PATCH_FAILED: Patch application failed"
+            exit 1
+          fi
+
+          # Compile
+          echo "Compiling..."
+          if ! arvo compile; then
+            echo "COMPILE_FAILED: Compilation failed"
+            exit 2
+          fi
+
+          # Run fuzzer with timeout
+          echo "Running fuzzer..."
+          if ! timeout {{TIMEOUT}} arvo; then
+            echo "FUZZER_FAILED: Fuzzer returned non-zero exit code: $?"
+            exit 3
+          fi
+
+          echo "VERIFICATION_SUCCESS: All steps passed"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        env:
+        - name: TASK_ID
+          value: "{{TASK_ID}}"
+      restartPolicy: Never
