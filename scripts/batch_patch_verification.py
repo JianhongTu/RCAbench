@@ -31,8 +31,6 @@ import asyncio
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from rcabench.utils import remote_fetch_diff, remote_fetch_error, remote_fetch_codebase
-from rcabench.db_utils import LiteDatabase
 
 # Configuration
 K8S_JOB_TEMPLATE = """
