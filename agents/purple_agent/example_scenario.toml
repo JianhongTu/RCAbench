@@ -1,0 +1,18 @@
+# Example scenario.toml for testing the purple agent
+# This follows the AgentBeats tutorial format
+
+[green_agent]
+image = "ghcr.io/agentbeats/tutorial-tau2-evaluator:latest"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
+
+[[participants]]
+agentbeats_id = ""  # Your purple agent ID from AgentBeats
+image = "ghcr.io/YOUR_USERNAME/rcabench-purple-agent:latest"
+name = "agent"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
+
+[config]
+arvo_id = "10055"  # Example ARVO task ID
+domain = "root_cause_analysis"
+num_tasks = 1
+

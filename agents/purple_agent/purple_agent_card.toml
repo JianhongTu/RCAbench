@@ -1,0 +1,18 @@
+# Agent Card for RCAbench Purple Agent
+# This file is used to register the agent on AgentBeats
+
+name = "RCAbench Purple Agent"
+description = "A purple agent for root cause analysis of vulnerable codebases based on fuzzer crash reports"
+url = "http://YOUR_PUBLIC_IP:YOUR_AGENT_PORT"  # Replace with your actual URL
+
+# Agent capabilities
+capabilities = [
+    "root_cause_analysis",
+    "vulnerability_localization",
+    "code_analysis"
+]
+
+# Agent metadata
+version = "0.1.0"
+author = "RCAbench Team"
+
