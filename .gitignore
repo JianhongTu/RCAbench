@@ -33,11 +33,13 @@ tls.key
 *.key
 
 # The following are initialized on demand
-data/
+
 workspace/
+results/
 tmp/
 logs/
 cache/
+data/
 
 *.egg-info/
 
