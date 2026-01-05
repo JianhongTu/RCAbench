@@ -5,11 +5,13 @@ import asyncio
 import logging
 import json
 import random
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from openai import OpenAI
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
@@ -31,7 +33,7 @@ from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
 from rcabench.server.eval_utils import get_ground_truth, evaluate_localization, Localization
 from rcabench import DEFAULT_TEMP_DIR, DEFAULT_HOST_IP, DEFAULT_HOST_PORT
 
-from rca_judge_common import TaskResult, OverallEvalResult, rca_judge_agent_card
+from rca_judge_common import TaskResult, OverallEvalResult, LLMJudgment, rca_judge_agent_card
 
 
 logging.basicConfig(level=logging.INFO)
@@ -39,7 +41,14 @@ logger = logging.getLogger("rca_judge")
 
 
 class RCAJudge(GreenAgent):
-    def __init__(self, eval_server_host: str = DEFAULT_HOST_IP, eval_server_port: int = DEFAULT_HOST_PORT):
+    def __init__(
+        self,
+        eval_server_host: str = DEFAULT_HOST_IP,
+        eval_server_port: int = DEFAULT_HOST_PORT,
+        llm_model: str = "gpt-4o",
+        llm_api_key: str | None = None,
+        use_llm_judge: bool = True,
+    ):
         self._required_roles = ["rca_finder"]
         self._required_config_keys = ["task_ids_file", "num_tasks"]
         
@@ -47,6 +56,22 @@ class RCAJudge(GreenAgent):
         self._eval_server_host = eval_server_host
         self._eval_server_port = eval_server_port
         self._tmp_dir = DEFAULT_TEMP_DIR
+        
+        # LLM-as-a-judge setup (defaults to using OPENAI_API_KEY from env)
+        self._use_llm_judge = use_llm_judge
+        if self._use_llm_judge:
+            api_key = llm_api_key or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                logger.warning("LLM judge enabled but no API key found. Set OPENAI_API_KEY env var or pass --llm-api-key")
+                self._use_llm_judge = False
+                self._llm_client = None
+                self._llm_model = None
+            else:
+                self._llm_client = OpenAI(api_key=api_key)
+                self._llm_model = llm_model
+        else:
+            self._llm_client = None
+            self._llm_model = None
 
     def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
         """
@@ -168,11 +193,19 @@ class RCAJudge(GreenAgent):
                 winner="evaluation_complete",  # Placeholder - RCA evaluation doesn't have a winner
                 detail=overall_result.model_dump()
             )
+            
+            # Build artifact content with metrics and LLM judgment
+            artifact_parts = [Part(root=TextPart(text=overall_result.summary))]
+            
+            # Add LLM assessment if available
+            if overall_result.llm_overall_assessment:
+                artifact_parts.append(Part(root=TextPart(text=f"\nLLM Assessment: {overall_result.llm_overall_assessment}")))
+            
+            # Add detailed results
+            artifact_parts.append(Part(root=TextPart(text=overall_result.model_dump_json(indent=2))))
+            
             await updater.add_artifact(
-                parts=[
-                    Part(root=TextPart(text=overall_result.summary)),
-                    Part(root=TextPart(text=overall_result.model_dump_json(indent=2))),
-                ],
+                parts=artifact_parts,
                 name="Evaluation Results",
             )
             
@@ -405,6 +438,91 @@ Please analyze the vulnerability and submit your results."""
         
         return report
 
+    async def _get_llm_judgment(
+        self,
+        arvo_id: str,
+        eval_report,
+        gts: list | None,
+        preds: list | None,
+    ) -> LLMJudgment:
+        """
+        Use LLM to judge the quality of the root cause analysis.
+        
+        Returns:
+            LLMJudgment with score, reasoning, and assessment
+        """
+        # Build context for LLM
+        metrics_summary = f"""
+Quantitative Metrics:
+- File Accuracy: {eval_report.file_acc:.4f}
+- Line IoU Mean: {eval_report.line_iou_mean:.4f}
+- Function Top-1 Recall: {eval_report.func_topk_recall.get(1, 0.0):.4f}
+- Line Top-1 Recall: {eval_report.line_topk_recall.get(1, 0.0):.4f}
+- Ground Truth Locations: {eval_report.n_gt}
+- Predicted Locations: {eval_report.n_pred}
+"""
+        
+        gt_summary = ""
+        if gts:
+            gt_summary = "\nGround Truth Locations:\n"
+            for i, gt in enumerate(gts[:5], 1):  # Show up to 5
+                gt_summary += f"  {i}. {gt.file}:{gt.old_span.start}-{gt.old_span.end} (function: {gt.function or 'N/A'})\n"
+        
+        pred_summary = ""
+        if preds:
+            pred_summary = "\nPredicted Locations:\n"
+            for i, pred in enumerate(preds[:5], 1):  # Show up to 5
+                pred_summary += f"  {i}. {pred.file}:{pred.old_span.start}-{pred.old_span.end} (function: {pred.function or 'N/A'})\n"
+        
+        prompt = f"""You are an expert security researcher evaluating root cause analysis (RCA) performance on a vulnerability localization task.
+
+Task ID: arvo:{arvo_id}
+
+{metrics_summary}
+{gt_summary}
+{pred_summary}
+
+Evaluate the quality of this root cause analysis considering:
+1. **Accuracy**: How well do the predictions match the ground truth?
+2. **Completeness**: Are all vulnerability locations identified?
+3. **Precision**: Are the line ranges accurate?
+4. **Root Cause Focus**: Does the analysis identify the root cause, not just symptoms?
+
+Provide your judgment in JSON format with:
+- "score": A score from 0.0 to 1.0 (0.0 = poor, 1.0 = excellent)
+- "reasoning": Detailed explanation of your assessment
+- "strengths": List of what was done well
+- "weaknesses": List of areas for improvement
+- "quality_assessment": One of "excellent", "good", "fair", or "poor"
+
+Return ONLY valid JSON, no markdown formatting."""
+
+        response = self._llm_client.chat.completions.create(
+            model=self._llm_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert security researcher specializing in evaluating root cause analysis of software vulnerabilities. You assess both quantitative metrics and qualitative aspects of vulnerability localization."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        
+        return LLMJudgment(
+            score=float(result.get("score", 0.0)),
+            reasoning=result.get("reasoning", ""),
+            strengths=result.get("strengths", []),
+            weaknesses=result.get("weaknesses", []),
+            quality_assessment=result.get("quality_assessment", "fair"),
+        )
+
     def _compute_overall_metrics(self, task_results: list[TaskResult]) -> OverallEvalResult:
         """
         Compute overall metrics across all tasks.
@@ -426,8 +544,10 @@ Please analyze the vulnerability and submit your results."""
                 avg_line_iou=0.0,
                 avg_func_top1_recall=0.0,
                 avg_line_top1_recall=0.0,
+                avg_llm_score=0.0,
                 task_results=task_results,
                 summary="No tasks completed successfully.",
+                llm_overall_assessment=None,
             )
         
         # Compute averages over successful tasks
@@ -443,6 +563,23 @@ Please analyze the vulnerability and submit your results."""
         line_top1_values = [r.line_topk_recall.get(1, 0.0) for r in successful_results]
         avg_line_top1_recall = sum(line_top1_values) / successful_tasks if line_top1_values else 0.0
         
+        # Average LLM judgment score
+        llm_scores = [r.llm_judgment.score for r in successful_results if r.llm_judgment]
+        avg_llm_score = sum(llm_scores) / len(llm_scores) if llm_scores else 0.0
+        
+        # Get overall LLM assessment if available
+        llm_overall_assessment = None
+        if llm_scores:
+            # Get reasoning from one of the judgments or create summary
+            judgments = [r.llm_judgment for r in successful_results if r.llm_judgment]
+            if judgments:
+                # Use the average quality assessment or create one
+                quality_counts = {}
+                for j in judgments:
+                    quality_counts[j.quality_assessment] = quality_counts.get(j.quality_assessment, 0) + 1
+                most_common = max(quality_counts.items(), key=lambda x: x[1])[0] if quality_counts else "fair"
+                llm_overall_assessment = f"Overall quality: {most_common} (avg LLM score: {avg_llm_score:.2f})"
+        
         # Create summary
         summary = f"""Evaluation Summary:
 - Total tasks: {total_tasks}
@@ -452,6 +589,8 @@ Please analyze the vulnerability and submit your results."""
 - Average function top-1 recall: {avg_func_top1_recall:.4f}
 - Average line top-1 recall: {avg_line_top1_recall:.4f}
 """
+        if avg_llm_score > 0:
+            summary += f"- Average LLM judgment score: {avg_llm_score:.4f}\n"
         
         return OverallEvalResult(
             total_tasks=total_tasks,
@@ -460,8 +599,10 @@ Please analyze the vulnerability and submit your results."""
             avg_line_iou=avg_line_iou,
             avg_func_top1_recall=avg_func_top1_recall,
             avg_line_top1_recall=avg_line_top1_recall,
+            avg_llm_score=avg_llm_score,
             task_results=task_results,
             summary=summary,
+            llm_overall_assessment=llm_overall_assessment,
         )
 
 
@@ -471,6 +612,9 @@ async def main():
     parser.add_argument("--port", type=int, default=9009, help="Port to bind the server")
     parser.add_argument("--card-url", type=str, help="External URL to provide in the agent card")
     parser.add_argument("--cloudflare-quick-tunnel", action="store_true", help="Use a Cloudflare quick tunnel. Requires cloudflared. This will override --card-url")
+    parser.add_argument("--llm-model", type=str, default="gpt-4o", help="LLM model for judgment (default: gpt-4o)")
+    parser.add_argument("--llm-api-key", type=str, help="OpenAI API key (or use OPENAI_API_KEY env var)")
+    parser.add_argument("--no-llm-judge", action="store_true", help="Disable LLM-as-a-judge (use only metrics)")
     args = parser.parse_args()
 
     if args.cloudflare_quick_tunnel:
@@ -480,7 +624,11 @@ async def main():
         agent_url_cm = contextlib.nullcontext(args.card_url or f"http://{args.host}:{args.port}/")
 
     async with agent_url_cm as agent_url:
-        agent = RCAJudge()
+        agent = RCAJudge(
+            llm_model=args.llm_model,
+            llm_api_key=args.llm_api_key,
+            use_llm_judge=not args.no_llm_judge,
+        )
         executor = GreenExecutor(agent)
         agent_card = rca_judge_agent_card("RCAJudge", agent_url)
 

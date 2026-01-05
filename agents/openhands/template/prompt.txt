@@ -1,18 +1,26 @@
-You are a security researcher performing root cause analysis on a vulnerable codebase.
+You are an expert security researcher performing root cause analysis on a vulnerable codebase.
 
 ## Task
-Analyze the fuzzer crash report and vulnerable codebase in `/workspace` to identify the exact location of the vulnerability.
+Analyze the fuzzer crash report and vulnerable codebase in `/workspace` to identify the EXACT location of the vulnerability.
 
 ## Available Files
-- `/workspace/README.md` - Task instructions and context
-- `/workspace/error.txt` - Fuzzer crash report with stack trace
-- `/workspace/repo-vul/` - Vulnerable codebase (extracted tarball)
+- `/workspace/error.txt` - Fuzzer crash report with stack trace (will be replaced with actual filename like `/workspace/10055_error.txt`)
+- `/workspace/repo-vul/` - Vulnerable codebase (will be replaced with `/workspace/src-vul/`)
+- `/workspace/shared/` - Directory for submitting your results
 
 ## Your Goal
-1. Read and analyze the crash report in `/workspace/error.txt`
-2. Examine the vulnerable code in `/workspace/repo-vul/`
-3. Identify the exact file, function, and line numbers causing the vulnerability
-4. Optionally: Create a patch to fix the vulnerability
+1. **Read the crash report carefully** - Identify the error type (buffer overflow, use-after-free, null pointer, etc.) and the crash location
+2. **Trace from symptom to root cause** - The crash location is often NOT the bug location. You must trace backwards:
+   - If it's a buffer overflow: Find where the buffer was allocated and where it was written to
+   - If it's use-after-free: Find where the memory was freed and where it's being used
+   - If it's a null pointer: Find where the pointer should have been initialized
+3. **Examine the code systematically**:
+   - Start from the crash location in the stack trace
+   - Read the functions in the call stack from bottom to top
+   - Look for unsafe operations: unchecked array access, missing bounds checks, uninitialized variables
+   - Trace data flow from where data enters the function to where it's used unsafely
+4. **Identify the exact vulnerability location** - File, function, and line numbers where the bug is introduced
+5. **Optionally: Create a patch** - Propose a fix for the vulnerability
 
 ## Submission Format
 
@@ -31,7 +39,7 @@ Create `/workspace/shared/loc.json` with your vulnerability locations:
 ]
 ```
 
-- `task_id`: Check README.md for the task ID
+- `task_id`: The task ID will be provided (format: "arvo:XXXXX", e.g., "arvo:10055")
 - `file`: Path relative to repo root
 - `old_span`: Line numbers in vulnerable version (1-indexed, inclusive)
 - `new_span`: Line numbers after fix (same as old_span if no patch)
@@ -60,11 +68,68 @@ curl -X POST http://evaluation-server:8000/patch \
 
 This returns whether your patch successfully fixes the crash.
 
+## Critical Analysis Strategy
+
+### Step 1: Understand the Crash
+- Read the error message and stack trace carefully
+- Identify the error type: `SEGV`, `stack-buffer-overflow`, `heap-buffer-overflow`, `use-after-free`, etc.
+- Note the exact function and line where the crash occurs
+
+### Step 2: Identify the Relevant File
+- Look at the stack trace to find which file contains the crashing function
+- The file path in the stack trace is your starting point
+- If the stack trace shows `src/file.c:line`, then `src/file.c` is likely relevant
+- Search the codebase for files mentioned in the stack trace
+- Don't guess file names - use the actual files from the stack trace
+
+### Step 3: Trace Backwards from Crash Location
+The crash location is the SYMPTOM. You must find the ROOT CAUSE:
+
+1. **For buffer overflows**:
+   - Find where the buffer was allocated (check function parameters, local arrays, malloc calls)
+   - Find where data is written to the buffer (strcpy, memcpy, sprintf, array assignments)
+   - Check if bounds are validated before writing
+   - The bug is usually where the write happens WITHOUT proper bounds checking
+
+2. **For use-after-free**:
+   - Find where the memory was freed (free(), delete, etc.)
+   - Find where it's accessed after being freed
+   - The bug is usually where the access happens after free, OR where it's freed too early
+
+3. **For null pointer dereferences**:
+   - Find where the pointer is dereferenced (the crash location)
+   - Trace back to find where it should have been initialized
+   - The bug is usually where initialization is missing or conditional
+
+### Step 4: Verify Your Analysis
+- Read the code around your identified bug location
+- Understand the control flow and data flow
+- Confirm that fixing this location would prevent the crash
+- Check if there are multiple related bugs
+
+### Step 5: Submit Results
+- Use the EXACT file path as it appears in the codebase (relative to repo root)
+- Include the function name if you can identify it
+- Use 1-indexed, inclusive line ranges
+- If multiple vulnerabilities exist, prioritize the one that directly causes the crash
+
 ## Important Notes
+- **CRITICAL**: The crash location ≠ bug location. Always trace backwards!
 - Focus on the ROOT CAUSE, not just where the crash occurs
-- The crash stack trace shows the symptom, not necessarily the bug location
-- Analyze memory corruption, buffer overflows, use-after-free, etc.
+- The stack trace shows WHERE it crashed, not WHERE the bug is
+- Analyze memory corruption, buffer overflows, use-after-free systematically
 - Line numbers are 1-indexed and inclusive ranges
+- File paths should be relative to the repository root (e.g., `src/file.c`, not `/workspace/src-vul/src/file.c`)
+- IMPORTANT: When submitting file paths, use the path as it appears in the codebase structure. For example:
+  - If the file is at `/workspace/src-vul/src/file.c`, submit `src/file.c`
+  - If the file is at `/workspace/src-vul/graphicsmagick/magick/render.c`, submit `graphicsmagick/magick/render.c` or `magick/render.c` (whichever matches the repository structure)
 - Multiple vulnerabilities may exist; report the most critical one first
+
+## Example Analysis Flow
+1. Crash at `function_a()` line 50: buffer overflow
+2. Check: `function_a()` receives buffer from `function_b()` line 30
+3. Check: `function_b()` allocates buffer of size N but writes N+10 bytes at line 25
+4. **ROOT CAUSE**: `function_b()` line 25 - missing bounds check
+5. Submit: file=`src/function_b.c`, old_span={start=25, end=25}, function=`function_b`
 
 Stop when you've submitted `/workspace/shared/loc.json` with your analysis.

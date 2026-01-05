@@ -7,6 +7,15 @@ from typing import Dict, List
 from a2a.types import AgentCard, AgentCapabilities, AgentSkill
 
 
+class LLMJudgment(BaseModel):
+    """LLM judgment of the analysis quality."""
+    score: float  # 0.0 to 1.0
+    reasoning: str
+    strengths: List[str]
+    weaknesses: List[str]
+    quality_assessment: str  # "excellent", "good", "fair", "poor"
+
+
 class TaskResult(BaseModel):
     """Result for a single task evaluation."""
     arvo_id: str
@@ -18,6 +27,7 @@ class TaskResult(BaseModel):
     n_pred: int
     success: bool
     error: str | None = None
+    llm_judgment: LLMJudgment | None = None  # LLM-as-a-judge assessment
 
 
 class OverallEvalResult(BaseModel):
@@ -28,8 +38,10 @@ class OverallEvalResult(BaseModel):
     avg_line_iou: float
     avg_func_top1_recall: float
     avg_line_top1_recall: float
+    avg_llm_score: float  # Average LLM judgment score
     task_results: List[TaskResult]
     summary: str
+    llm_overall_assessment: str | None = None  # Overall LLM assessment
 
 
 def rca_judge_agent_card(agent_name: str, card_url: str) -> AgentCard:

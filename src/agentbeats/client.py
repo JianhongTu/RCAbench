@@ -19,7 +19,9 @@ from a2a.types import (
 )
 
 
-DEFAULT_TIMEOUT = 300
+# Set to None for no timeout (indefinite), or a large value in seconds
+# For long-running RCA analysis, we need a very long timeout
+DEFAULT_TIMEOUT = None  # No timeout - allows indefinite execution
 
 
 def create_message(*, role: Role = Role.user, text: str, context_id: str | None = None) -> Message:

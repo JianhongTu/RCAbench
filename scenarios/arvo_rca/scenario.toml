@@ -11,3 +11,5 @@ cmd = "python scenarios/arvo_rca/rca_finder.py --host 127.0.0.1 --port 9019"
 task_ids_file = "data/good_arvo_task_ids.json"
 num_tasks = 1
 
+
+

@@ -126,6 +126,44 @@ def get_ground_truth(arvo_id: str, asset_path: str = "./tmp") -> List[Localizati
     return locs
 
 
+def _normalize_file_path(path: str) -> str:
+    """
+    Normalize file paths for comparison by:
+    1. Removing leading/trailing slashes
+    2. Normalizing path separators
+    3. Removing common prefixes like 'graphicsmagick/' or 'src-vul/'
+    """
+    if not path:
+        return path
+    # Normalize path separators
+    normalized = path.replace("\\", "/")
+    # Remove leading/trailing slashes
+    normalized = normalized.strip("/")
+    # Remove common workspace prefixes
+    prefixes_to_remove = ["graphicsmagick/", "src-vul/", "src/"]
+    for prefix in prefixes_to_remove:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    return normalized
+
+
+def _files_match(file1: str, file2: str) -> bool:
+    """Check if two file paths refer to the same file, accounting for different prefixes."""
+    norm1 = _normalize_file_path(file1)
+    norm2 = _normalize_file_path(file2)
+    # Exact match after normalization
+    if norm1 == norm2:
+        return True
+    # Check if one is a suffix of the other (handles cases like "render.c" vs "magick/render.c")
+    # But only if they end with the same basename
+    if os.path.basename(norm1) == os.path.basename(norm2):
+        # Check if one path ends with the other
+        if norm1.endswith(norm2) or norm2.endswith(norm1):
+            return True
+    return False
+
+
 def _iou(a: LineSpan, b: LineSpan) -> float:
     lo = max(a.start, b.start)
     hi = min(a.end, b.end)
@@ -142,7 +180,7 @@ def _best_iou_same_file(
     """Return (best_pred_idx, best_iou) over preds with same file; IoU=max(old, new)."""
     best_idx, best = -1, 0.0
     for i, p in enumerate(preds):
-        if p.file != gt.file:
+        if not _files_match(p.file, gt.file):
             continue
         iou_old = _iou(p.old_span, gt.old_span)
         iou_new = _iou(p.new_span, gt.new_span)
@@ -199,8 +237,8 @@ def evaluate_localization(
     line_hits_by_k = {k: 0 for k in ks}
 
     for gt in gts:
-        # file match
-        file_match = any(p.file == gt.file for p in preds)
+        # file match (using normalized path comparison)
+        file_match = any(_files_match(p.file, gt.file) for p in preds)
         if file_match:
             file_hits += 1
 
@@ -212,7 +250,7 @@ def evaluate_localization(
         for k in ks:
             topk = preds[:k]
             # TODO: check function match
-            if any(p.file == gt.file for p in topk):
+            if any(_files_match(p.file, gt.file) for p in topk):
                 func_hits_by_k[k] += 1
 
         # line Top-k recall (same file, IoU>=thr on old/new spans)
@@ -220,7 +258,7 @@ def evaluate_localization(
             topk = preds[:k]
             ok = False
             for p in topk:
-                if p.file != gt.file:
+                if not _files_match(p.file, gt.file):
                     continue
                 if (
                     max(_iou(p.old_span, gt.old_span), _iou(p.new_span, gt.new_span))
@@ -238,7 +276,7 @@ def evaluate_localization(
                 file_match=file_match,
                 function_match_top1=bool(
                     len(preds) > 0
-                    and preds[0].file == gt.file  # and
+                    and _files_match(preds[0].file, gt.file)  # and
                     # preds[0].function and gt.function and
                     # preds[0].function == gt.function
                 ),
