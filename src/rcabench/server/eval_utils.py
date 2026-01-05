@@ -174,20 +174,58 @@ def _iou(a: LineSpan, b: LineSpan) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _line_proximity(a: LineSpan, b: LineSpan) -> float:
+    """
+    Calculate proximity score for line ranges that don't overlap.
+    Returns a value between 0 and 1 based on how close the ranges are.
+    Uses inverse distance with exponential decay.
+    """
+    # Calculate center points
+    center_a = (a.start + a.end) / 2.0
+    center_b = (b.start + b.end) / 2.0
+    
+    # Distance between centers
+    distance = abs(center_a - center_b)
+    
+    # Average range size for normalization
+    avg_size = ((a.end - a.start + 1) + (b.end - b.start + 1)) / 2.0
+    
+    # Normalize distance by average size
+    normalized_distance = distance / max(avg_size, 1.0)
+    
+    # Exponential decay: score = e^(-normalized_distance)
+    # This gives 1.0 for same location, ~0.37 for 1x distance, ~0.14 for 2x distance
+    import math
+    proximity = math.exp(-normalized_distance / 2.0)  # Divide by 2 to make decay slower
+    
+    return proximity
+
+
 def _best_iou_same_file(
     gt: Localization, preds: List[Localization]
-) -> Tuple[int, float]:
-    """Return (best_pred_idx, best_iou) over preds with same file; IoU=max(old, new)."""
-    best_idx, best = -1, 0.0
+) -> Tuple[int, float, float]:
+    """
+    Return (best_pred_idx, best_iou, best_proximity) over preds with same file.
+    IoU=max(old, new). Proximity is calculated even when IoU=0.
+    """
+    best_idx, best_iou, best_proximity = -1, 0.0, 0.0
     for i, p in enumerate(preds):
         if not _files_match(p.file, gt.file):
             continue
         iou_old = _iou(p.old_span, gt.old_span)
         iou_new = _iou(p.new_span, gt.new_span)
         iou = max(iou_old, iou_new)
-        if iou > best:
-            best, best_idx = iou, i
-    return best_idx, best
+        
+        # Calculate proximity (even if IoU is 0)
+        prox_old = _line_proximity(p.old_span, gt.old_span)
+        prox_new = _line_proximity(p.new_span, gt.new_span)
+        proximity = max(prox_old, prox_new)
+        
+        if iou > best_iou:
+            best_iou, best_idx = iou, i
+        if proximity > best_proximity:
+            best_proximity = proximity
+    return best_idx, best_iou, best_proximity
 
 
 class PerGT(BaseModel):
@@ -196,6 +234,7 @@ class PerGT(BaseModel):
     file_match: bool
     function_match_top1: bool
     line_iou_best: float
+    line_proximity_best: float  # Proximity score for best match (even if IoU=0)
 
 
 class EvalReport(BaseModel):
@@ -206,6 +245,7 @@ class EvalReport(BaseModel):
     func_topk_recall: Dict[int, float]
     line_topk_recall: Dict[int, float]
     line_iou_mean: float
+    line_proximity_mean: float  # Average proximity score (for same-file matches)
     per_gt: List[PerGT]
 
 
@@ -225,6 +265,7 @@ def evaluate_localization(
             func_topk_recall={k: 0.0 for k in ks},
             line_topk_recall={k: 0.0 for k in ks},
             line_iou_mean=0.0,
+            line_proximity_mean=0.0,
             per_gt=[],
         )
 
@@ -232,6 +273,7 @@ def evaluate_localization(
     per_gt: List[PerGT] = []
     file_hits = 0
     line_ious = []
+    line_proximities = []
 
     func_hits_by_k = {k: 0 for k in ks}
     line_hits_by_k = {k: 0 for k in ks}
@@ -242,9 +284,10 @@ def evaluate_localization(
         if file_match:
             file_hits += 1
 
-        # best IoU (same file), for reporting
-        best_idx, best_iou = _best_iou_same_file(gt, preds)
+        # best IoU and proximity (same file), for reporting
+        best_idx, best_iou, best_proximity = _best_iou_same_file(gt, preds)
         line_ious.append(best_iou)
+        line_proximities.append(best_proximity if file_match else 0.0)
 
         # function Top-k recall (exact name & same file)
         for k in ks:
@@ -281,6 +324,7 @@ def evaluate_localization(
                     # preds[0].function == gt.function
                 ),
                 line_iou_best=best_iou,
+                line_proximity_best=best_proximity if file_match else 0.0,
             )
         )
 
@@ -293,6 +337,7 @@ def evaluate_localization(
         func_topk_recall={k: func_hits_by_k[k] / n for k in ks},
         line_topk_recall={k: line_hits_by_k[k] / n for k in ks},
         line_iou_mean=(sum(line_ious) / n if n else 0.0),
+        line_proximity_mean=(sum(line_proximities) / n if n else 0.0),
         per_gt=per_gt,
     )
     return report

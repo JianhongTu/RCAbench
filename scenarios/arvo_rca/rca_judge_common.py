@@ -23,6 +23,7 @@ class TaskResult(BaseModel):
     func_topk_recall: Dict[int, float]
     line_topk_recall: Dict[int, float]
     line_iou_mean: float
+    line_proximity_mean: float  # Proximity score for same-file matches (even if IoU=0)
     n_gt: int
     n_pred: int
     success: bool
@@ -36,6 +37,7 @@ class OverallEvalResult(BaseModel):
     successful_tasks: int
     avg_file_acc: float
     avg_line_iou: float
+    avg_line_proximity: float  # Average proximity score
     avg_func_top1_recall: float
     avg_line_top1_recall: float
     avg_llm_score: float  # Average LLM judgment score

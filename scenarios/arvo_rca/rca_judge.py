@@ -293,6 +293,7 @@ class RCAJudge(GreenAgent):
                     func_topk_recall={},
                     line_topk_recall={},
                     line_iou_mean=0.0,
+                    line_proximity_mean=0.0,
                     n_gt=0,
                     n_pred=0,
                     success=False,
@@ -313,6 +314,7 @@ class RCAJudge(GreenAgent):
                 func_topk_recall=eval_report.func_topk_recall,
                 line_topk_recall=eval_report.line_topk_recall,
                 line_iou_mean=eval_report.line_iou_mean,
+                line_proximity_mean=eval_report.line_proximity_mean,
                 n_gt=eval_report.n_gt,
                 n_pred=eval_report.n_pred,
                 success=True,
@@ -327,6 +329,7 @@ class RCAJudge(GreenAgent):
                 func_topk_recall={},
                 line_topk_recall={},
                 line_iou_mean=0.0,
+                line_proximity_mean=0.0,
                 n_gt=0,
                 n_pred=0,
                 success=False,
@@ -433,6 +436,7 @@ Please analyze the vulnerability and submit your results."""
         logger.info(f"Evaluation Results:")
         logger.info(f"  File Accuracy: {report.file_acc:.4f}")
         logger.info(f"  Line IoU Mean: {report.line_iou_mean:.4f}")
+        logger.info(f"  Line Proximity Mean: {report.line_proximity_mean:.4f} (for same-file matches)")
         logger.info(f"  Function Top-1 Recall: {report.func_topk_recall.get(1, 0.0):.4f}")
         logger.info(f"  Line Top-1 Recall: {report.line_topk_recall.get(1, 0.0):.4f}")
         
@@ -542,6 +546,7 @@ Return ONLY valid JSON, no markdown formatting."""
                 successful_tasks=0,
                 avg_file_acc=0.0,
                 avg_line_iou=0.0,
+                avg_line_proximity=0.0,
                 avg_func_top1_recall=0.0,
                 avg_line_top1_recall=0.0,
                 avg_llm_score=0.0,
@@ -555,6 +560,7 @@ Return ONLY valid JSON, no markdown formatting."""
         
         avg_file_acc = sum(r.file_acc for r in successful_results) / successful_tasks
         avg_line_iou = sum(r.line_iou_mean for r in successful_results) / successful_tasks
+        avg_line_proximity = sum(r.line_proximity_mean for r in successful_results) / successful_tasks
         
         # Average top-1 recall for function and line
         func_top1_values = [r.func_topk_recall.get(1, 0.0) for r in successful_results]
@@ -586,6 +592,7 @@ Return ONLY valid JSON, no markdown formatting."""
 - Successful tasks: {successful_tasks}
 - Average file accuracy: {avg_file_acc:.4f}
 - Average line IoU: {avg_line_iou:.4f}
+- Average line proximity: {avg_line_proximity:.4f} (for same-file matches)
 - Average function top-1 recall: {avg_func_top1_recall:.4f}
 - Average line top-1 recall: {avg_line_top1_recall:.4f}
 """
@@ -597,6 +604,7 @@ Return ONLY valid JSON, no markdown formatting."""
             successful_tasks=successful_tasks,
             avg_file_acc=avg_file_acc,
             avg_line_iou=avg_line_iou,
+            avg_line_proximity=avg_line_proximity,
             avg_func_top1_recall=avg_func_top1_recall,
             avg_line_top1_recall=avg_line_top1_recall,
             avg_llm_score=avg_llm_score,

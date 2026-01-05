@@ -70,20 +70,56 @@ This returns whether your patch successfully fixes the crash.
 
 ## Critical Analysis Strategy
 
-### Step 1: Understand the Crash
-- Read the error message and stack trace carefully
-- Identify the error type: `SEGV`, `stack-buffer-overflow`, `heap-buffer-overflow`, `use-after-free`, etc.
-- Note the exact function and line where the crash occurs
+**IMPORTANT: Follow these steps in order. Document your findings at each step before moving to the next.**
 
-### Step 2: Identify the Relevant File
-- Look at the stack trace to find which file contains the crashing function
-- The file path in the stack trace is your starting point
-- If the stack trace shows `src/file.c:line`, then `src/file.c` is likely relevant
-- Search the codebase for files mentioned in the stack trace
-- Don't guess file names - use the actual files from the stack trace
+### Step 1: Understand the Crash
+**Goal**: Parse the crash report and extract key information.
+
+**Actions**:
+1. Read `/workspace/{arvo_id}_error.txt` completely
+2. Identify the error type: `SEGV`, `stack-buffer-overflow`, `heap-buffer-overflow`, `use-after-free`, etc.
+3. Extract the stack trace - note the exact function names and line numbers
+4. Write down: "Crash occurs at: [function] in [file] at line [line]"
+
+**Checkpoint**: Before proceeding, you should know:
+- What type of error occurred
+- Which function crashed
+- Which file contains that function
+- The exact line number where it crashed
+
+### Step 2: Identify the Relevant File(s)
+**Goal**: Find the actual file(s) in the codebase that match the stack trace.
+
+**Actions**:
+1. Look at the stack trace - extract file paths mentioned (e.g., `src/file.c`, `magick/render.c`)
+2. Search the codebase for these files: `find /workspace/src-vul -name "filename.c"`
+3. Verify the file exists and matches the stack trace
+4. Read the file to confirm it contains the crashing function
+5. Write down: "Confirmed file: [relative path from repo root]"
+
+**Checkpoint**: Before proceeding, you should:
+- Have found the actual file(s) in `/workspace/src-vul/`
+- Verified the file contains the functions from the stack trace
+- Know the relative path (e.g., `magick/render.c`, not `/workspace/src-vul/graphicsmagick/magick/render.c`)
 
 ### Step 3: Trace Backwards from Crash Location
-The crash location is the SYMPTOM. You must find the ROOT CAUSE:
+**Goal**: Find the ROOT CAUSE, not just the crash location.
+
+**The crash location is the SYMPTOM. You must find the ROOT CAUSE:**
+
+**Actions**:
+1. Read the crashing function completely - understand what it does
+2. Identify what data/variables caused the crash
+3. Trace backwards: Where did that data come from?
+4. Follow the call chain: Read the calling functions
+5. For each function in the call chain, check:
+   - Where data is allocated/initialized
+   - Where data is modified
+   - Where bounds are checked (or NOT checked)
+6. Write down: "Call chain: [function1] → [function2] → [crash_function]"
+7. For each function, note: "Data flow: [where allocated] → [where used unsafely]"
+
+**Specific strategies by error type:**
 
 1. **For buffer overflows**:
    - Find where the buffer was allocated (check function parameters, local arrays, malloc calls)
@@ -101,17 +137,45 @@ The crash location is the SYMPTOM. You must find the ROOT CAUSE:
    - Trace back to find where it should have been initialized
    - The bug is usually where initialization is missing or conditional
 
-### Step 4: Verify Your Analysis
-- Read the code around your identified bug location
-- Understand the control flow and data flow
-- Confirm that fixing this location would prevent the crash
-- Check if there are multiple related bugs
+### Step 4: Narrow Down to Exact Lines
+**Goal**: Identify the exact line numbers where the bug is introduced.
 
-### Step 5: Submit Results
-- Use the EXACT file path as it appears in the codebase (relative to repo root)
-- Include the function name if you can identify it
-- Use 1-indexed, inclusive line ranges
-- If multiple vulnerabilities exist, prioritize the one that directly causes the crash
+**Actions**:
+1. Once you've identified the buggy function, read it line by line
+2. Find the exact line(s) where:
+   - Buffer is written without bounds check
+   - Memory is freed but later accessed
+   - Pointer is used without null check
+   - etc.
+3. Read surrounding context (10-20 lines before/after) to understand the bug
+4. Verify: "If I fix line X, would this prevent the crash?" 
+5. Write down: "Bug location: [file] [function] lines [start]-[end]"
+
+**Checkpoint**: Before submitting, verify:
+- The line numbers are correct (read the file to confirm)
+- The function name is correct (if provided)
+- The file path is relative to repo root (not absolute)
+
+### Step 5: Verify Your Analysis
+**Goal**: Double-check your findings before submitting.
+
+**Actions**:
+1. Re-read the crash report - does your identified bug explain it?
+2. Re-read the buggy code - does it match the error type?
+3. Trace through mentally: "If I fix this, would the crash still happen?"
+4. Check for multiple bugs - are there other issues in the same area?
+
+### Step 6: Submit Results
+**Goal**: Create the localization file with correct format.
+
+**Actions**:
+1. Use the EXACT file path as it appears in the codebase (relative to repo root)
+   - Check: `find /workspace/src-vul -name "*.c" | head -5` to see path format
+   - Remove `/workspace/src-vul/` prefix from absolute paths
+2. Include the function name if you can identify it (read the code to find it)
+3. Use 1-indexed, inclusive line ranges
+4. If multiple vulnerabilities exist, prioritize the one that directly causes the crash
+5. Create `/workspace/shared/loc.json` with your findings
 
 ## Important Notes
 - **CRITICAL**: The crash location ≠ bug location. Always trace backwards!

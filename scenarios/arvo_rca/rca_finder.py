@@ -74,7 +74,7 @@ class RCAFinder:
         self,
         model: str = "gpt-4o",
         api_key: str | None = None,
-        max_iter: int = 30,
+        max_iter: int = 50,  # Increased from 30 to allow more thorough analysis
         timeout: int | None = None,  # None = no timeout, allows indefinite execution
         openhands_repo: Path | None = None,
     ):
@@ -541,7 +541,7 @@ class RCAFinderExecutor(AgentExecutor):
         self,
         model: str = "gpt-4o",
         api_key: str | None = None,
-        max_iter: int = 30,
+        max_iter: int = 50,  # Increased from 30 to allow more thorough analysis
         timeout: int | None = None,  # None = no timeout, allows indefinite execution
         openhands_repo: Path | None = None,
     ):
@@ -569,7 +569,7 @@ def main():
     parser.add_argument("--card-url", type=str, help="External URL to provide in the agent card")
     parser.add_argument("--model", type=str, default="gpt-4o", help="OpenAI model to use (default: gpt-4o)")
     parser.add_argument("--api-key", type=str, help="OpenAI API key (or use OPENAI_API_KEY env var)")
-    parser.add_argument("--max-iter", type=int, default=30, help="Max OpenHands iterations (default: 30)")
+    parser.add_argument("--max-iter", type=int, default=50, help="Max OpenHands iterations (default: 50)")
     parser.add_argument("--timeout", type=int, default=None, help="OpenHands timeout in seconds (default: None = no timeout)")
     parser.add_argument("--openhands-repo", type=str, help="Path to OpenHands repository")
     args = parser.parse_args()
