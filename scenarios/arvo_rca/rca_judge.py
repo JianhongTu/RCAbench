@@ -33,7 +33,7 @@ from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
 from rcabench.server.eval_utils import get_ground_truth, evaluate_localization, Localization
 from rcabench import DEFAULT_TEMP_DIR, DEFAULT_HOST_IP, DEFAULT_HOST_PORT
 
-from rca_judge_common import TaskResult, OverallEvalResult, LLMJudgment, rca_judge_agent_card
+from rca_judge_common import TaskResult, OverallEvalResult, LLMJudgment, ReasoningTrace, ReasoningJudgment, rca_judge_agent_card
 
 
 logging.basicConfig(level=logging.INFO)
@@ -271,22 +271,28 @@ class RCAJudge(GreenAgent):
             
             logger.info(f"Purple agent response for {arvo_id}: {response}")
             
-            # Wait for agent to submit results (check for loc.json file)
+            # Wait for agent to submit results (check for loc.json and reasoning.json files)
             loc_file = shared_dir / "loc.json"
+            reasoning_file = shared_dir / "reasoning.json"
             max_wait_time = 300  # 5 minutes
             wait_interval = 2
             waited = 0
-            while not loc_file.exists() and waited < max_wait_time:
+            while (not loc_file.exists() or not reasoning_file.exists()) and waited < max_wait_time:
                 await asyncio.sleep(wait_interval)
                 waited += wait_interval
                 if waited % 10 == 0:
+                    missing = []
+                    if not loc_file.exists():
+                        missing.append("loc.json")
+                    if not reasoning_file.exists():
+                        missing.append("reasoning.json")
                     await updater.update_status(
                         TaskState.working,
-                        new_agent_text_message(f"Waiting for submission for task {arvo_id}... ({waited}s)")
+                        new_agent_text_message(f"Waiting for submission for task {arvo_id}... ({waited}s) Missing: {', '.join(missing)}")
                     )
             
             if not loc_file.exists():
-                logger.warning(f"No submission found for task {arvo_id} after {waited}s")
+                logger.warning(f"No loc.json submission found for task {arvo_id} after {waited}s")
                 return TaskResult(
                     arvo_id=arvo_id,
                     file_acc=0.0,
@@ -297,7 +303,56 @@ class RCAJudge(GreenAgent):
                     n_gt=0,
                     n_pred=0,
                     success=False,
-                    error="No submission received",
+                    error="No loc.json submission received",
+                    reasoning_trace=None,
+                )
+            
+            if not reasoning_file.exists():
+                logger.warning(f"No reasoning.json submission found for task {arvo_id} after {waited}s")
+                return TaskResult(
+                    arvo_id=arvo_id,
+                    file_acc=0.0,
+                    func_topk_recall={},
+                    line_topk_recall={},
+                    line_iou_mean=0.0,
+                    line_proximity_mean=0.0,
+                    n_gt=0,
+                    n_pred=0,
+                    success=False,
+                    error="No reasoning.json submission received (reasoning trace is required)",
+                    reasoning_trace=None,
+                )
+            
+            # Load and validate reasoning trace
+            reasoning_trace = None
+            try:
+                with open(reasoning_file, "r") as f:
+                    reasoning_data = json.load(f)
+                reasoning_trace = ReasoningTrace.model_validate(reasoning_data)
+                
+                # Validate that task_id matches
+                if reasoning_trace.task_id != f"arvo:{arvo_id}" and reasoning_trace.task_id != arvo_id:
+                    logger.warning(f"Reasoning trace task_id mismatch: expected arvo:{arvo_id}, got {reasoning_trace.task_id}")
+                
+                # Validate that reasoning steps exist
+                if not reasoning_trace.reasoning_steps:
+                    logger.warning(f"Reasoning trace has no steps for task {arvo_id}")
+                
+                logger.info(f"Loaded reasoning trace with {len(reasoning_trace.reasoning_steps)} steps for task {arvo_id}")
+            except Exception as e:
+                logger.error(f"Error loading/validating reasoning trace for task {arvo_id}: {e}", exc_info=True)
+                return TaskResult(
+                    arvo_id=arvo_id,
+                    file_acc=0.0,
+                    func_topk_recall={},
+                    line_topk_recall={},
+                    line_iou_mean=0.0,
+                    line_proximity_mean=0.0,
+                    n_gt=0,
+                    n_pred=0,
+                    success=False,
+                    error=f"Invalid reasoning trace: {str(e)}",
+                    reasoning_trace=None,
                 )
             
             # Evaluate the results
@@ -307,6 +362,24 @@ class RCAJudge(GreenAgent):
             )
             
             eval_report = await self._evaluate_task_results(arvo_id, shared_dir, updater)
+            
+            # Get LLM judgment (if enabled)
+            llm_judgment = None
+            if self._use_llm_judge:
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(f"Getting LLM judgment for task {arvo_id}...")
+                )
+                # Load predictions and ground truth for LLM context
+                loc_file = shared_dir / "loc.json"
+                with open(loc_file, "r") as f:
+                    loc_data = json.load(f)
+                preds = [Localization.from_dict(loc) for loc in loc_data]
+                gts = get_ground_truth(arvo_id)
+                
+                llm_judgment = await self._get_llm_judgment(
+                    arvo_id, eval_report, gts, preds, reasoning_trace
+                )
             
             return TaskResult(
                 arvo_id=arvo_id,
@@ -319,6 +392,8 @@ class RCAJudge(GreenAgent):
                 n_pred=eval_report.n_pred,
                 success=True,
                 error=None,
+                reasoning_trace=reasoning_trace,
+                llm_judgment=llm_judgment,
             )
             
         except Exception as e:
@@ -334,6 +409,7 @@ class RCAJudge(GreenAgent):
                 n_pred=0,
                 success=False,
                 error=str(e),
+                reasoning_trace=None,
             )
         finally:
             # Cleanup task assets
@@ -442,28 +518,155 @@ Please analyze the vulnerability and submit your results."""
         
         return report
 
+    async def _evaluate_reasoning_quality(
+        self,
+        arvo_id: str,
+        reasoning_trace: ReasoningTrace,
+        eval_report,
+        gts: list | None,
+        preds: list | None,
+    ) -> ReasoningJudgment:
+        """
+        Use LLM to evaluate the quality of the reasoning process separately from correctness.
+        
+        This evaluates HOW the agent reasoned, not whether the answer was correct.
+        Like a teacher grading the work shown, not just the final answer.
+        
+        Returns:
+            ReasoningJudgment with reasoning quality scores
+        """
+        # Format reasoning steps
+        reasoning_steps_text = ""
+        for step in reasoning_trace.reasoning_steps:
+            evidence_str = ", ".join(step.evidence) if step.evidence else "none"
+            pred_link = f" (links to prediction {step.prediction_id})" if step.prediction_id is not None else ""
+            reasoning_steps_text += f"\nStep {step.step} ({step.type}): {step.content}\n"
+            reasoning_steps_text += f"  Evidence: {evidence_str}{pred_link}\n"
+        
+        rejected_text = ""
+        if reasoning_trace.rejected_hypotheses:
+            rejected_text = "\nRejected Hypotheses:\n"
+            for rej in reasoning_trace.rejected_hypotheses:
+                rejected_text += f"  - {rej.hypothesis}\n"
+                rejected_text += f"    Why rejected: {rej.why_rejected}\n"
+        
+        # Build correctness context (for reference, but reasoning is evaluated separately)
+        correctness_context = f"""
+Reference: Correctness Metrics (for context only - evaluate reasoning separately):
+- File Accuracy: {eval_report.file_acc:.4f}
+- Line IoU Mean: {eval_report.line_iou_mean:.4f}
+- Function Top-1 Recall: {eval_report.func_topk_recall.get(1, 0.0):.4f}
+- Line Top-1 Recall: {eval_report.line_topk_recall.get(1, 0.0):.4f}
+"""
+        
+        prompt = f"""You are an expert security researcher evaluating the REASONING PROCESS of a root cause analysis.
+
+Task ID: arvo:{arvo_id}
+
+{correctness_context}
+
+Reasoning Trace:
+{reasoning_steps_text}
+{rejected_text}
+
+**IMPORTANT**: Evaluate the QUALITY OF THE REASONING PROCESS, not just whether the answer was correct.
+Give partial credit for good reasoning even if the final answer was wrong.
+
+Evaluate these dimensions separately:
+
+1. **Logical Flow** (0.0-1.0): Are the steps logical, sequential, and coherent? Do they build on each other?
+2. **Evidence Quality** (0.0-1.0): Are evidence citations appropriate? Do they support the reasoning?
+3. **Root Cause Focus** (0.0-1.0): Does the reasoning trace from symptoms to root cause? Or does it stop at the crash location?
+4. **Overall Reasoning Quality** (0.0-1.0): How well-structured and thorough is the reasoning process?
+
+Provide your judgment in JSON format with:
+- "reasoning_score": Overall reasoning quality score (0.0 to 1.0)
+- "logical_flow_score": Logical flow score (0.0 to 1.0)
+- "evidence_quality_score": Evidence quality score (0.0 to 1.0)
+- "root_cause_focus_score": Root cause focus score (0.0 to 1.0)
+- "reasoning_strengths": List of what was done well in the reasoning
+- "reasoning_weaknesses": List of what could be improved
+- "reasoning_assessment": One of "excellent", "good", "fair", or "poor"
+
+Return ONLY valid JSON, no markdown formatting."""
+
+        response = self._llm_client.chat.completions.create(
+            model=self._llm_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert security researcher specializing in evaluating reasoning processes in root cause analysis. You assess the quality of the thinking process separately from answer correctness, like a teacher grading the work shown on an exam."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        
+        return ReasoningJudgment(
+            reasoning_score=float(result.get("reasoning_score", 0.0)),
+            logical_flow_score=float(result.get("logical_flow_score", 0.0)),
+            evidence_quality_score=float(result.get("evidence_quality_score", 0.0)),
+            root_cause_focus_score=float(result.get("root_cause_focus_score", 0.0)),
+            reasoning_strengths=result.get("reasoning_strengths", []),
+            reasoning_weaknesses=result.get("reasoning_weaknesses", []),
+            reasoning_assessment=result.get("reasoning_assessment", "fair"),
+        )
+
     async def _get_llm_judgment(
         self,
         arvo_id: str,
         eval_report,
         gts: list | None,
         preds: list | None,
+        reasoning_trace: ReasoningTrace | None = None,
     ) -> LLMJudgment:
         """
         Use LLM to judge the quality of the root cause analysis.
         
+        Now evaluates both correctness AND reasoning quality separately.
+        
         Returns:
-            LLMJudgment with score, reasoning, and assessment
+            LLMJudgment with combined score, correctness score, and reasoning judgment
         """
-        # Build context for LLM
+        # Compute correctness score from metrics (strict, no inflation)
+        correctness_score = (
+            eval_report.file_acc * 0.4 +  # File accuracy is important
+            eval_report.line_iou_mean * 0.3 +  # Line precision matters
+            eval_report.line_topk_recall.get(1, 0.0) * 0.3  # Top-1 recall
+        )
+        
+        # Evaluate reasoning quality separately if reasoning trace is available
+        reasoning_judgment = None
+        if reasoning_trace and self._use_llm_judge:
+            reasoning_judgment = await self._evaluate_reasoning_quality(
+                arvo_id, reasoning_trace, eval_report, gts, preds
+            )
+        
+        # Build context for overall assessment
         metrics_summary = f"""
-Quantitative Metrics:
+Quantitative Metrics (Correctness):
 - File Accuracy: {eval_report.file_acc:.4f}
 - Line IoU Mean: {eval_report.line_iou_mean:.4f}
 - Function Top-1 Recall: {eval_report.func_topk_recall.get(1, 0.0):.4f}
 - Line Top-1 Recall: {eval_report.line_topk_recall.get(1, 0.0):.4f}
 - Ground Truth Locations: {eval_report.n_gt}
 - Predicted Locations: {eval_report.n_pred}
+- Computed Correctness Score: {correctness_score:.4f}
+"""
+        
+        if reasoning_judgment:
+            metrics_summary += f"""
+Reasoning Quality Scores:
+- Overall Reasoning Score: {reasoning_judgment.reasoning_score:.4f}
+- Logical Flow: {reasoning_judgment.logical_flow_score:.4f}
+- Evidence Quality: {reasoning_judgment.evidence_quality_score:.4f}
+- Root Cause Focus: {reasoning_judgment.root_cause_focus_score:.4f}
 """
         
         gt_summary = ""
@@ -486,14 +689,10 @@ Task ID: arvo:{arvo_id}
 {gt_summary}
 {pred_summary}
 
-Evaluate the quality of this root cause analysis considering:
-1. **Accuracy**: How well do the predictions match the ground truth?
-2. **Completeness**: Are all vulnerability locations identified?
-3. **Precision**: Are the line ranges accurate?
-4. **Root Cause Focus**: Does the analysis identify the root cause, not just symptoms?
+Evaluate the overall quality considering both correctness and reasoning quality.
 
 Provide your judgment in JSON format with:
-- "score": A score from 0.0 to 1.0 (0.0 = poor, 1.0 = excellent)
+- "score": Combined overall score (0.0 to 1.0) - weighted combination of correctness and reasoning
 - "reasoning": Detailed explanation of your assessment
 - "strengths": List of what was done well
 - "weaknesses": List of areas for improvement
@@ -506,7 +705,7 @@ Return ONLY valid JSON, no markdown formatting."""
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert security researcher specializing in evaluating root cause analysis of software vulnerabilities. You assess both quantitative metrics and qualitative aspects of vulnerability localization."
+                    "content": "You are an expert security researcher specializing in evaluating root cause analysis of software vulnerabilities. You assess both quantitative metrics (correctness) and qualitative aspects (reasoning quality) of vulnerability localization."
                 },
                 {
                     "role": "user",
@@ -520,11 +719,13 @@ Return ONLY valid JSON, no markdown formatting."""
         result = json.loads(response.choices[0].message.content)
         
         return LLMJudgment(
-            score=float(result.get("score", 0.0)),
+            score=float(result.get("score", correctness_score)),  # Combined score
+            correctness_score=correctness_score,  # Strict correctness (no inflation)
             reasoning=result.get("reasoning", ""),
             strengths=result.get("strengths", []),
             weaknesses=result.get("weaknesses", []),
             quality_assessment=result.get("quality_assessment", "fair"),
+            reasoning_judgment=reasoning_judgment,  # Separate reasoning evaluation
         )
 
     def _compute_overall_metrics(self, task_results: list[TaskResult]) -> OverallEvalResult:
@@ -550,6 +751,7 @@ Return ONLY valid JSON, no markdown formatting."""
                 avg_func_top1_recall=0.0,
                 avg_line_top1_recall=0.0,
                 avg_llm_score=0.0,
+                avg_reasoning_score=0.0,
                 task_results=task_results,
                 summary="No tasks completed successfully.",
                 llm_overall_assessment=None,
@@ -573,6 +775,14 @@ Return ONLY valid JSON, no markdown formatting."""
         llm_scores = [r.llm_judgment.score for r in successful_results if r.llm_judgment]
         avg_llm_score = sum(llm_scores) / len(llm_scores) if llm_scores else 0.0
         
+        # Average reasoning quality score (separate from correctness)
+        reasoning_scores = [
+            r.llm_judgment.reasoning_judgment.reasoning_score
+            for r in successful_results
+            if r.llm_judgment and r.llm_judgment.reasoning_judgment
+        ]
+        avg_reasoning_score = sum(reasoning_scores) / len(reasoning_scores) if reasoning_scores else 0.0
+        
         # Get overall LLM assessment if available
         llm_overall_assessment = None
         if llm_scores:
@@ -585,6 +795,8 @@ Return ONLY valid JSON, no markdown formatting."""
                     quality_counts[j.quality_assessment] = quality_counts.get(j.quality_assessment, 0) + 1
                 most_common = max(quality_counts.items(), key=lambda x: x[1])[0] if quality_counts else "fair"
                 llm_overall_assessment = f"Overall quality: {most_common} (avg LLM score: {avg_llm_score:.2f})"
+                if avg_reasoning_score > 0:
+                    llm_overall_assessment += f", avg reasoning score: {avg_reasoning_score:.2f}"
         
         # Create summary
         summary = f"""Evaluation Summary:
@@ -598,6 +810,8 @@ Return ONLY valid JSON, no markdown formatting."""
 """
         if avg_llm_score > 0:
             summary += f"- Average LLM judgment score: {avg_llm_score:.4f}\n"
+        if avg_reasoning_score > 0:
+            summary += f"- Average reasoning quality score: {avg_reasoning_score:.4f}\n"
         
         return OverallEvalResult(
             total_tasks=total_tasks,
@@ -608,6 +822,7 @@ Return ONLY valid JSON, no markdown formatting."""
             avg_func_top1_recall=avg_func_top1_recall,
             avg_line_top1_recall=avg_line_top1_recall,
             avg_llm_score=avg_llm_score,
+            avg_reasoning_score=avg_reasoning_score,
             task_results=task_results,
             summary=summary,
             llm_overall_assessment=llm_overall_assessment,

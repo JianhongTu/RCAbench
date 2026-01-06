@@ -147,18 +147,33 @@ class RCAFinder:
             # Check if results were created
             shared_dir = Path(workspace_dir) / "shared"
             loc_file = shared_dir / "loc.json"
+            reasoning_file = shared_dir / "reasoning.json"
             
-            if loc_file.exists():
+            if loc_file.exists() and reasoning_file.exists():
                 await event_queue.enqueue_event(
                     new_agent_text_message(
-                        f"Analysis complete for arvo:{arvo_id}. Localization saved to {loc_file}",
+                        f"Analysis complete for arvo:{arvo_id}. Localization and reasoning trace saved.",
+                        context_id=context.context_id
+                    )
+                )
+            elif loc_file.exists():
+                await event_queue.enqueue_event(
+                    new_agent_text_message(
+                        f"Warning: OpenHands completed with loc.json but no reasoning.json found. Reasoning trace is required.",
+                        context_id=context.context_id
+                    )
+                )
+            elif reasoning_file.exists():
+                await event_queue.enqueue_event(
+                    new_agent_text_message(
+                        f"Warning: OpenHands completed with reasoning.json but no loc.json found.",
                         context_id=context.context_id
                     )
                 )
             else:
                 await event_queue.enqueue_event(
                     new_agent_text_message(
-                        f"Warning: OpenHands completed but no loc.json found at {loc_file}",
+                        f"Warning: OpenHands completed but neither loc.json nor reasoning.json found.",
                         context_id=context.context_id
                     )
                 )

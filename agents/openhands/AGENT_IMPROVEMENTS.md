@@ -70,3 +70,5 @@ Instead of free-form analysis, require structured intermediate outputs:
 2. **Medium Priority**: Increase max_iter default to 50
 3. **Low Priority**: Add example cases to prompt
 
+
+

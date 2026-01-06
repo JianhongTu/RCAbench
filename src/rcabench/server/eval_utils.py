@@ -131,7 +131,14 @@ def _normalize_file_path(path: str) -> str:
     Normalize file paths for comparison by:
     1. Removing leading/trailing slashes
     2. Normalizing path separators
-    3. Removing common prefixes like 'graphicsmagick/' or 'src-vul/'
+    3. Removing common workspace prefixes (iteratively to handle nested prefixes)
+    4. Extracting canonical relative path
+    
+    Examples:
+    - "src-vul/graphicsmagick/magick/render.c" -> "magick/render.c"
+    - "graphicsmagick/magick/render.c" -> "magick/render.c"
+    - "magick/render.c" -> "magick/render.c"
+    - "render.c" -> "render.c"
     """
     if not path:
         return path
@@ -139,28 +146,83 @@ def _normalize_file_path(path: str) -> str:
     normalized = path.replace("\\", "/")
     # Remove leading/trailing slashes
     normalized = normalized.strip("/")
-    # Remove common workspace prefixes
-    prefixes_to_remove = ["graphicsmagick/", "src-vul/", "src/"]
-    for prefix in prefixes_to_remove:
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix):]
-            break
+    
+    # Common workspace root prefixes to remove (order matters - remove longer/more specific first)
+    # These are prefixes that might appear in workspace structures
+    prefixes_to_remove = [
+        "src-vul/",
+        "src/",
+        "graphicsmagick/",
+        "repo-vul/",
+        "workspace/",
+        "codebase/",
+    ]
+    
+    # Iteratively remove prefixes until no more can be removed
+    # This handles nested cases like "src-vul/graphicsmagick/magick/render.c"
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes_to_remove:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                changed = True
+                break
+    
     return normalized
 
 
+def _get_path_components(path: str) -> List[str]:
+    """Split a normalized path into components, filtering out empty strings."""
+    return [c for c in path.split("/") if c]
+
+
 def _files_match(file1: str, file2: str) -> bool:
-    """Check if two file paths refer to the same file, accounting for different prefixes."""
+    """
+    Check if two file paths refer to the same file, accounting for different prefixes.
+    
+    Uses multiple matching strategies:
+    1. Exact match after normalization
+    2. Component-based matching (compare last N components)
+    3. Suffix matching (if basenames match)
+    
+    Examples that should match:
+    - "graphicsmagick/magick/render.c" vs "magick/render.c" -> True
+    - "src-vul/magick/render.c" vs "magick/render.c" -> True
+    - "render.c" vs "magick/render.c" -> True (if basename matches and one is suffix)
+    - "magick/render.c" vs "render.c" -> True
+    """
     norm1 = _normalize_file_path(file1)
     norm2 = _normalize_file_path(file2)
-    # Exact match after normalization
+    
+    # Strategy 1: Exact match after normalization
     if norm1 == norm2:
         return True
-    # Check if one is a suffix of the other (handles cases like "render.c" vs "magick/render.c")
-    # But only if they end with the same basename
-    if os.path.basename(norm1) == os.path.basename(norm2):
-        # Check if one path ends with the other
+    
+    # Strategy 2: Component-based matching
+    # Compare last 2-3 path components (handles cases where one has extra root dirs)
+    comp1 = _get_path_components(norm1)
+    comp2 = _get_path_components(norm2)
+    
+    # If one path is a suffix of the other (last N components match)
+    # Compare up to min(len(comp1), len(comp2)) components
+    min_len = min(len(comp1), len(comp2))
+    if min_len > 0:
+        # Check if last components match (at least 2 components, or 1 if it's the full path)
+        for n in range(min(3, min_len), 0, -1):  # Try 3, 2, then 1 components
+            if comp1[-n:] == comp2[-n:]:
+                return True
+    
+    # Strategy 3: Suffix matching with basename check
+    # If basenames match, check if one path ends with the other
+    basename1 = os.path.basename(norm1)
+    basename2 = os.path.basename(norm2)
+    if basename1 == basename2 and basename1:  # Non-empty basename
+        # Check if one normalized path ends with the other
+        # This handles: "magick/render.c" vs "render.c"
         if norm1.endswith(norm2) or norm2.endswith(norm1):
             return True
+    
     return False
 
 

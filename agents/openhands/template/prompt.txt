@@ -45,6 +45,62 @@ Create `/workspace/shared/loc.json` with your vulnerability locations:
 - `new_span`: Line numbers after fix (same as old_span if no patch)
 - `function`: Name of the function containing the bug
 
+### Reasoning Trace Submission (REQUIRED)
+Create `/workspace/shared/reasoning.json` with your step-by-step reasoning:
+
+```json
+{
+  "task_id": "arvo:XXXXX",
+  "reasoning_steps": [
+    {
+      "step": 1,
+      "type": "observation",
+      "content": "Crash report shows buffer overflow at line 1234 in render.c",
+      "evidence": ["error.txt:45-50"]
+    },
+    {
+      "step": 2,
+      "type": "hypothesis",
+      "content": "The buffer is allocated in allocate_buffer() but size calculation is wrong",
+      "evidence": ["render.c:1200-1210"]
+    },
+    {
+      "step": 3,
+      "type": "analysis",
+      "content": "Traced data flow: input -> parse_size() -> allocate_buffer() -> write_buffer()",
+      "evidence": ["render.c:1150-1234"]
+    },
+    {
+      "step": 4,
+      "type": "conclusion",
+      "content": "Root cause: parse_size() doesn't validate input, leading to integer overflow",
+      "evidence": ["render.c:1180-1185"],
+      "prediction_id": 0
+    }
+  ],
+  "rejected_hypotheses": [
+    {
+      "hypothesis": "Crash is in write_buffer()",
+      "why_rejected": "write_buffer() is correct, the issue is in size calculation"
+    }
+  ]
+}
+```
+
+**Reasoning Step Types:**
+- `observation`: Facts extracted from crash report, stack trace, or code
+- `hypothesis`: A theory about what might be causing the issue
+- `analysis`: Investigation, data flow tracing, or code examination
+- `conclusion`: Final determination of root cause (should link to a prediction via `prediction_id`)
+- `verification`: Double-checking or confirming findings
+
+**Requirements:**
+- Each step must have a clear `content` describing what you did/found
+- Include `evidence` citations (file:line or file:start-end) where applicable
+- Link conclusions to predictions using `prediction_id` (index into loc.json array)
+- Document rejected hypotheses to show you considered alternatives
+- Steps should be sequential and show your thought process
+
 ### Patch Submission (OPTIONAL)
 Create `/workspace/shared/patch.diff` if you want to propose a fix:
 
