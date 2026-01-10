@@ -17,6 +17,9 @@ from a2a.utils import (
 )
 from a2a.utils.errors import ServerError
 
+import logging
+logger = logging.getLogger(__name__)
+
 from agentbeats.models import EvalRequest
 
 
@@ -65,11 +68,35 @@ class GreenExecutor(AgentExecutor):
 
         try:
             await self.agent.run_eval(req, updater)
-            await updater.complete()
+            try:
+                await updater.complete()
+            except RuntimeError as e:
+                if "terminal state" in str(e):
+                    logger.debug(f"Task {updater.task_id} already in terminal state, skipping completion.")
+                else:
+                    raise
         except Exception as e:
-            print(f"Agent error: {e}")
-            await updater.failed(new_agent_text_message(f"Agent error: {e}", context_id=context.context_id))
+            logger.error(f"Agent error in execution: {e}", exc_info=True)
+            try:
+                await updater.failed(new_agent_text_message(f"Agent error: {e}", context_id=context.context_id))
+            except RuntimeError as re:
+                if "terminal state" in str(re):
+                    logger.debug(f"Task {updater.task_id} already in terminal state, skipping failure notice.")
+                else:
+                    logger.error(f"Failed to mark task as failed: {re}")
             raise ServerError(error=InternalError(message=str(e)))
+
+    async def _is_task_terminal(self, updater: TaskUpdater) -> bool:
+        """Check if a task is already in a terminal state."""
+        try:
+            # This is a bit of a hack since TaskUpdater doesn't expose state easily
+            # But we can try to get the task from the store if we had access to it.
+            # For now, we'll just catch the RuntimeError in the updater itself if we can,
+            # or trust that our agents are now better behaved.
+            # But let's add a safer check if possible.
+            return False 
+        except:
+            return False
 
     async def cancel(
         self, request: RequestContext, event_queue: EventQueue

@@ -115,28 +115,42 @@ def main():
     try:
         # start participant agents
         for p in cfg["participants"]:
-            cmd_args = shlex.split(p.get("cmd", ""))
-            if cmd_args:
-                print(f"Starting {p['role']} at {p['host']}:{p['port']}")
+            cmd_str = p.get("cmd", "")
+            if cmd_str:
+                # Replace 'python' with sys.executable to ensure correct interpreter
+                # Use shlex.split first, then replace 'python' in the list
+                cmd_args = shlex.split(cmd_str)
+                # Replace 'python' or 'python.exe' with sys.executable in the args list
+                for i, arg in enumerate(cmd_args):
+                    if arg == "python" or arg == "python.exe":
+                        cmd_args[i] = sys.executable
+                if cmd_args:
+                    print(f"Starting {p['role']} at {p['host']}:{p['port']}")
+                    procs.append(subprocess.Popen(
+                        cmd_args,
+                        env=base_env,
+                        stdout=sink, stderr=sink,
+                        text=True,
+                        start_new_session=True,
+                    ))
+
+        # start host
+        green_cmd_str = cfg["green_agent"].get("cmd", "")
+        if green_cmd_str:
+            green_cmd_args = shlex.split(green_cmd_str)
+            # Replace 'python' or 'python.exe' with sys.executable in the args list
+            for i, arg in enumerate(green_cmd_args):
+                if arg == "python" or arg == "python.exe":
+                    green_cmd_args[i] = sys.executable
+            if green_cmd_args:
+                print(f"Starting green agent at {cfg['green_agent']['host']}:{cfg['green_agent']['port']}")
                 procs.append(subprocess.Popen(
-                    cmd_args,
+                    green_cmd_args,
                     env=base_env,
                     stdout=sink, stderr=sink,
                     text=True,
                     start_new_session=True,
                 ))
-
-        # start host
-        green_cmd_args = shlex.split(cfg["green_agent"].get("cmd", ""))
-        if green_cmd_args:
-            print(f"Starting green agent at {cfg['green_agent']['host']}:{cfg['green_agent']['port']}")
-            procs.append(subprocess.Popen(
-                green_cmd_args,
-                env=base_env,
-                stdout=sink, stderr=sink,
-                text=True,
-                start_new_session=True,
-            ))
 
         # Wait for all agents to be ready
         if not asyncio.run(wait_for_agents(cfg)):
@@ -168,15 +182,23 @@ def main():
         for p in procs:
             if p.poll() is None:
                 try:
-                    os.killpg(p.pid, signal.SIGTERM)
-                except ProcessLookupError:
+                    if sys.platform == "win32":
+                        # Windows doesn't have killpg, use terminate
+                        p.terminate()
+                    else:
+                        os.killpg(p.pid, signal.SIGTERM)
+                except (ProcessLookupError, AttributeError):
                     pass
         time.sleep(1)
         for p in procs:
             if p.poll() is None:
                 try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    if sys.platform == "win32":
+                        # Windows doesn't have killpg, use kill
+                        p.kill()
+                    else:
+                        os.killpg(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, AttributeError):
                     pass
 
 

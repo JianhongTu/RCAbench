@@ -1,0 +1,50 @@
+======================================================================
+STATISTICS SUMMARY
+======================================================================
+
+📊 Overall Statistics:
+  Total tasks analyzed: 226
+  Successful analyses: 222
+  Failed analyses: 4
+
+📈 Difficulty Distribution:
+  Easy    :  151 ( 68.0%)
+  Hard    :   12 (  5.4%)
+  Medium  :   59 ( 26.6%)
+
+🔧 Patch Application:
+  Patches apply: 0
+  Patches don't apply: 222
+
+📝 Patch Analysis Statistics:
+  Num Files:
+    Min:     1.0
+    Max:     6.0
+    Avg:     1.4
+    Total:    312
+  Num Code Files:
+    Min:     0.0
+    Max:     5.0
+    Avg:     1.2
+    Total:    260
+  Lines Added:
+    Min:     0.0
+    Max:   286.0
+    Avg:    12.2
+    Total:   2716
+  Lines Removed:
+    Min:     0.0
+    Max:    76.0
+    Avg:     4.7
+    Total:   1041
+  Total Changes:
+    Min:     1.0
+    Max:   362.0
+    Avg:    16.9
+    Total:   3757
+
+❌ Failed Tasks (4):
+  Task 24097: Unexpected error downloading error file for arvo_id 24097: 'charmap' codec can't encode character '\ufffd' in position 454: character maps to <undefined>
+  Task 30051: Unexpected error downloading error file for arvo_id 30051: 'charmap' codec can't encode characters in position 338-342: character maps to <undefined>
+  Task 30271: Unexpected error downloading error file for arvo_id 30271: 'charmap' codec can't encode characters in position 363-364: character maps to <undefined>
+  Task 37151: [WinError 267] The directory name is invalid: 'tmp\\validation\\task_37151\\src-vul\\knot-dns\\scripts\\docker\\fedora:latest'

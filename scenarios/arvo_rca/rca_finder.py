@@ -1,11 +1,8 @@
 """
-RCA Finder (Purple Agent) that uses OpenHands to analyze vulnerabilities.
+Simplified RCA Finder (Purple Agent) - Lightweight LLM wrapper for bash tool calling.
 
-This implementation:
-1. Receives task descriptions from the green agent
-2. Parses the task information (arvo_id, workspace, codebase, error report)
-3. Runs OpenHands agentic framework to analyze the vulnerability
-4. Reads localization results from the shared directory
+Receives tasks from green agent and uses LLM to generate bash commands for analysis.
+Maintains conversation state to respond to green agent's messages.
 """
 
 import argparse
@@ -14,14 +11,13 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from openai import OpenAI
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.apps import A2AStarletteApplication
@@ -30,546 +26,332 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentCapabilities
 from a2a.utils import new_agent_text_message
 
-import tomllib
-import tomli_w
-
-# Helper functions (copied from run_white_agent.py to avoid importing openhands)
-OPENAI_PREFIXES = ["gpt-", "o3", "o4"]
-ANTHROPIC_PREFIXES = ["claude-"]
-
-
-def get_api_key(model: str):
-    """Get API key from environment based on model name."""
-    if any(model.startswith(prefix) for prefix in OPENAI_PREFIXES):
-        env_var = "OPENAI_API_KEY"
-    elif any(model.startswith(prefix) for prefix in ANTHROPIC_PREFIXES):
-        env_var = "ANTHROPIC_API_KEY"
-    else:
-        env_var = "LLM_API_KEY"
-    
-    api_key = os.getenv(env_var)
-    return api_key if api_key else "EMPTY"
-
-
-def model_map(model: str):
-    """Map model name to OpenHands format."""
-    if model.startswith("claude-"):
-        return model
-    elif len(model.split("/")) >= 2:
-        return model
-    return f"openai/{model}"
-
-logging.basicConfig(level=logging.INFO)
+# Set up logging - ensure errors are always visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s - %(name)s - %(message)s",
+    force=True,  # Override any existing config
+)
 logger = logging.getLogger("rca_finder")
 
-# OpenHands repo path (adjust if needed)
-OPENHANDS_REPO = Path(__file__).parent.parent.parent / "agents" / "openhands" / "openhands-repo"
-OPENHANDS_TEMPLATE = Path(__file__).parent.parent.parent / "agents" / "openhands" / "template"
+# Ensure ERROR and WARNING logs are always shown
+logger.setLevel(logging.INFO)
+
+
+class ConversationState:
+    """Maintains state for a single conversation."""
+    
+    def __init__(self, arvo_id: str, task_description: str):
+        self.arvo_id = arvo_id
+        self.task_description = task_description
+        self.messages = [
+            {
+                "role": "system",
+                "content": """You are a security researcher performing root cause analysis.
+You can run bash commands to analyze code. When you want to run a command, respond with ONLY a JSON object:
+{"type": "bash_command", "command": "your command here"}
+
+When you're done and want to submit results, respond with:
+{"type": "done"}
+
+## Recommended Commands (for large files, use targeted commands):
+- head -n 100 file.c (read first 100 lines - better than cat for large files)
+- tail -n 100 file.c (read last 100 lines)
+- sed -n '100,200p' file.c (read lines 100-200)
+- grep -n "pattern" file.c (search with line numbers)
+- grep -A 5 -B 5 "pattern" file.c (context around matches)
+- wc -l file.c (count lines in file)
+- cat file.c (only for small files - will be truncated if too large)
+
+## Other useful commands:
+- ls -la src-vul/ (list directory)
+- find src-vul/ -name "*.c" (find files)
+- grep -r "pattern" src-vul/ (recursive search)"""
+            },
+            {
+                "role": "user",
+                "content": task_description
+            }
+        ]
+        self.iteration = 0
+        self.max_iterations = 50
 
 
 class RCAFinder:
-    """RCA Finder that uses OpenHands to analyze vulnerabilities."""
+    """Simplified RCA Finder - uses LLM to generate bash commands."""
     
     def __init__(
         self,
         model: str = "gpt-4o",
         api_key: str | None = None,
-        max_iter: int = 50,  # Increased from 30 to allow more thorough analysis
-        timeout: int | None = None,  # None = no timeout, allows indefinite execution
-        openhands_repo: Path | None = None,
+        trace_conversation: bool = False,
     ):
         self.model = model
-        # Default to OpenAI API key from environment
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
-            logger.warning("No OpenAI API key found. Set OPENAI_API_KEY env var or pass --api-key")
-        self.max_iter = max_iter
-        self.timeout = timeout
-        self.openhands_repo = openhands_repo or OPENHANDS_REPO
-        self.template_dir = OPENHANDS_TEMPLATE
+            raise ValueError("No API key found. Set OPENAI_API_KEY env var or pass --api-key")
         
-        # Check if OpenHands is set up
-        if not self.openhands_repo.exists():
-            logger.warning(f"OpenHands repo not found at {self.openhands_repo}")
-            logger.warning("To set up OpenHands, run:")
-            logger.warning("  cd agents/openhands")
-            logger.warning("  git clone https://github.com/OpenHands/OpenHands.git openhands-repo")
-            logger.warning("  cd openhands-repo")
-            logger.warning("  git checkout c34030b2875da72f752906eec93b379fb7965d0c")
-            logger.warning("  make build INSTALL_PLAYWRIGHT=false")
+        self.llm_client = OpenAI(api_key=self.api_key)
+        # Store conversation state per context_id
+        self.conversations: Dict[str, ConversationState] = {}
+        self._trace_conversation = trace_conversation
         
-        # Verify browsergym is available (will be checked/installed at runtime if missing)
-        # This is a required dependency that may be missing if dependencies weren't fully installed
-    
     async def handle_task(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """
-        Handle a task request from the green agent.
-        
-        Runs OpenHands to analyze the vulnerability and generate localization results.
-        """
-        # Get the message text from the context
+        """Handle message from green agent - respond with tool call or reasoning."""
+        # Extract message
         message_text = ""
         if context.message and context.message.parts:
             for part in context.message.parts:
                 if hasattr(part.root, 'text'):
                     message_text += part.root.text
         
-        logger.info(f"Received task: {message_text[:200]}...")
+        context_id = context.context_id
         
-        # Parse task information from the message
-        arvo_id = self._extract_arvo_id(message_text)
-        workspace_dir = self._extract_workspace_dir(message_text)
+        # Trace logging
+        if self._trace_conversation:
+            logger.info(f"[TRACE] PURPLE received from GREEN: {message_text[:200]}...")
         
-        if not arvo_id or not workspace_dir:
-            error_msg = f"Could not parse task information. arvo_id={arvo_id}, workspace_dir={workspace_dir}"
-            logger.error(error_msg)
-            await event_queue.enqueue_event(
-                new_agent_text_message(f"Error: {error_msg}", context_id=context.context_id)
-            )
-            return
+        logger.info(f"[{context_id[:8]}] Received: {message_text[:100]}...")
         
-        logger.info(f"Parsed task: arvo_id={arvo_id}, workspace_dir={workspace_dir}")
-        
-        # Send status update
-        await event_queue.enqueue_event(
-            new_agent_text_message(f"Starting OpenHands analysis for arvo:{arvo_id}...", context_id=context.context_id)
-        )
-        
+        # Check message type
         try:
-            # Run OpenHands on the existing workspace
-            await self._run_openhands_on_workspace(
-                arvo_id=arvo_id,
-                workspace_dir=Path(workspace_dir),
-                event_queue=event_queue,
-                context_id=context.context_id,
-            )
+            msg_data = json.loads(message_text)
             
-            # Check if results were created
-            shared_dir = Path(workspace_dir) / "shared"
-            loc_file = shared_dir / "loc.json"
-            reasoning_file = shared_dir / "reasoning.json"
+            if "task_description" in msg_data and context_id not in self.conversations:
+                task_desc = msg_data["task_description"]
+                arvo_id = self._extract_arvo_id(task_desc)
+                if arvo_id:
+                    self.conversations[context_id] = ConversationState(arvo_id, task_desc)
+                    logger.info(f"[{context_id[:8]}] Initialized with task_description for arvo:{arvo_id}")
             
-            if loc_file.exists() and reasoning_file.exists():
+            # Ensure state exists
+            if context_id not in self.conversations:
+                logger.error(f"[{context_id[:8]}] No conversation state found for this context")
+                return
+            
+            state = self.conversations[context_id]
+            
+            if msg_data.get("type") == "ready_for_tool_call":
+                # Green agent is ready - send tool call
+                response = await self._get_next_tool_call(state, event_queue, context_id)
+                
+                if self._trace_conversation:
+                    logger.info(f"[TRACE] PURPLE → GREEN: {response[:200]}...")
+                
                 await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        f"Analysis complete for arvo:{arvo_id}. Localization and reasoning trace saved.",
-                        context_id=context.context_id
-                    )
+                    new_agent_text_message(response, context_id=context_id)
                 )
-            elif loc_file.exists():
+            elif msg_data.get("type") == "command_result":
+                # Green agent sent command result - process it
+                stdout = msg_data.get("stdout", "")
+                success = msg_data.get("success", False)
+                exit_code = msg_data.get("exit_code", 1)
+                
+                # Truncate large outputs to prevent token limit issues
+                # Rough estimate: ~4 chars per token, so 5000 tokens = ~20k chars
+                MAX_OUTPUT_CHARS = 20000
+                if len(stdout) > MAX_OUTPUT_CHARS:
+                    truncated = stdout[:MAX_OUTPUT_CHARS]
+                    stdout = f"{truncated}\n... [Output truncated: {len(stdout)} chars total, showing first {MAX_OUTPUT_CHARS} chars]"
+                    logger.warning(f"[{context_id[:8]}] Truncated large command output: {len(msg_data.get('stdout', ''))} chars")
+                
+                # Add result to conversation
+                result_text = f"Command result (success={success}, exit_code={exit_code}):\n{stdout}"
+                state.messages.append({
+                    "role": "user",
+                    "content": result_text
+                })
+                
+                # Smart conversation history management
+                # Keep system + task + all assistant messages (reasoning) + recent command results
+                MAX_MESSAGES = 20  # Allow more messages
+                if len(state.messages) > MAX_MESSAGES:
+                    # Separate messages by role
+                    system_and_task = state.messages[:2]  # Keep system + task
+                    rest = state.messages[2:]
+                    
+                    # Keep all assistant messages (LLM reasoning is valuable)
+                    assistant_msgs = [msg for msg in rest if msg.get("role") == "assistant"]
+                    
+                    # Keep recent user messages (command results) - last 8
+                    user_msgs = [msg for msg in rest if msg.get("role") == "user"]
+                    recent_user_msgs = user_msgs[-8:] if len(user_msgs) > 8 else user_msgs
+                    
+                    # Reconstruct: system + task + all assistant + recent user
+                    state.messages = system_and_task + assistant_msgs + recent_user_msgs
+                    logger.info(f"[{context_id[:8]}] Trimmed conversation: kept {len(assistant_msgs)} assistant + {len(recent_user_msgs)} recent user messages")
+                
+                # Get next tool call
+                response = await self._get_next_tool_call(state, event_queue, context_id)
+                
+                if self._trace_conversation:
+                    logger.info(f"[TRACE] PURPLE → GREEN: {response[:200]}...")
+                
                 await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        f"Warning: OpenHands completed with loc.json but no reasoning.json found. Reasoning trace is required.",
-                        context_id=context.context_id
-                    )
-                )
-            elif reasoning_file.exists():
-                await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        f"Warning: OpenHands completed with reasoning.json but no loc.json found.",
-                        context_id=context.context_id
-                    )
+                    new_agent_text_message(response, context_id=context_id)
                 )
             else:
-                await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        f"Warning: OpenHands completed but neither loc.json nor reasoning.json found.",
-                        context_id=context.context_id
-                    )
-                )
+                # Unknown message type - treat as regular message
+                state.messages.append({"role": "user", "content": message_text})
+                response = await self._get_next_tool_call(state, event_queue, context_id)
                 
-        except Exception as e:
-            logger.error(f"Error analyzing task {arvo_id}: {e}", exc_info=True)
-            error_msg = f"Error analyzing task {arvo_id}: {str(e)}"
-            try:
+                if self._trace_conversation:
+                    logger.info(f"[TRACE] PURPLE → GREEN: {response[:200]}...")
+                
                 await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        error_msg,
-                        context_id=context.context_id
-                    )
+                    new_agent_text_message(response, context_id=context_id)
                 )
-            except Exception as queue_error:
-                # If event queue is closed, log the error
-                logger.warning(f"Could not send error message to event queue: {queue_error}")
-            # Re-raise to ensure the error is propagated
-            raise
+        except json.JSONDecodeError:
+            # Not JSON - treat as regular message
+            if context_id not in self.conversations:
+                logger.error(f"[{context_id[:8]}] Non-JSON message received before initialization")
+                return
+                
+            state = self.conversations[context_id]
+            if message_text.strip() and message_text != state.task_description:
+                state.messages.append({"role": "user", "content": message_text})
+            
+            # Get response
+            response = await self._get_next_tool_call(state, event_queue, context_id)
+            
+            if self._trace_conversation:
+                logger.info(f"[TRACE] PURPLE → GREEN: {response[:200]}...")
+            
+            await event_queue.enqueue_event(
+                new_agent_text_message(response, context_id=context_id)
+            )
     
-    async def _run_openhands_on_workspace(
+    async def _get_next_tool_call(
         self,
-        arvo_id: str,
-        workspace_dir: Path,
+        state: ConversationState,
         event_queue: EventQueue,
         context_id: str,
-    ) -> None:
-        """
-        Run OpenHands on an existing workspace directory.
+    ) -> str:
+        """Get next tool call from LLM using a loop for retries."""
         
-        The workspace is already prepared by the green agent, so we just need to:
-        1. Set up OpenHands config pointing to this workspace
-        2. Run OpenHands
-        3. Wait for completion
-        """
-        # Create temporary directory for OpenHands config and logs
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
+        for attempt in range(3): # Max 3 attempts per turn to get valid JSON
+            if state.iteration >= state.max_iterations:
+                return json.dumps({"type": "done", "reason": "Max iterations reached"})
             
-            # Copy template files
-            template_dest = tmp_path / "template"
-            if self.template_dir.exists():
-                shutil.copytree(self.template_dir, template_dest)
-            else:
-                logger.error(f"OpenHands template directory not found: {self.template_dir}")
-                raise FileNotFoundError(f"OpenHands template not found: {self.template_dir}")
+            state.iteration += 1
             
-            # Update prompt.txt with task ID and correct paths
-            prompt_file = template_dest / "prompt.txt"
-            if prompt_file.exists():
-                with open(prompt_file, "r") as f:
-                    prompt_content = f.read()
-                # Replace placeholder with actual task ID
-                prompt_content = prompt_content.replace("arvo:XXXXX", f"arvo:{arvo_id}")
-                # Update paths to match actual workspace structure
-                # The workspace has: {arvo_id}_error.txt and src-vul/ directory
-                error_file = f"{arvo_id}_error.txt"
-                prompt_content = prompt_content.replace("/workspace/error.txt", f"/workspace/{error_file}")
-                prompt_content = prompt_content.replace("/workspace/repo-vul/", "/workspace/src-vul/")
-                with open(prompt_file, "w") as f:
-                    f.write(prompt_content)
-            
-            # Configure OpenHands config.toml
-            config_path = template_dest / "config.toml"
-            with open(config_path, "r") as f:
-                config = tomllib.loads(f.read())
-            
-            # Set workspace to the existing workspace directory
-            config["core"]["workspace_base"] = str(workspace_dir.absolute()).replace("\\", "/")
-            
-            # Set cache and log directories
-            log_dir = tmp_path / "logs"
-            log_dir.mkdir()
-            config["core"]["cache_dir"] = str((log_dir / "cache").absolute()).replace("\\", "/")
-            config["core"]["file_store_path"] = str((log_dir / "file").absolute()).replace("\\", "/")
-            config["core"]["save_trajectory_path"] = str((log_dir / "trajectory").absolute()).replace("\\", "/")
-            
-            # Configure LLM
-            config["llm"]["model"] = model_map(self.model)
-            config["llm"]["base_url"] = ""  # Use default OpenAI endpoint
-            config["llm"]["max_output_tokens"] = 2048
-            config["llm"]["top_p"] = 1.0
-            config["llm"]["temperature"] = 0.0
-            
-            # Write updated config
-            with open(config_path, "w") as f:
-                f.write(tomli_w.dumps(config))
-            
-            # Update environment for OpenHands
-            # Start with a copy of the current environment to preserve Poetry's settings
-            env = os.environ.copy()
-            env["OPENAI_API_KEY"] = self.api_key or get_api_key(self.model)
-            
-            # Poetry needs these environment variables to work correctly
-            # Don't override them if they're already set
-            if "POETRY_VENV" not in env:
-                # Poetry will find its venv automatically, but we can help it
-                pass
-            
-            # Check and install OpenHands dependencies if needed (before running OpenHands)
-            await event_queue.enqueue_event(
-                new_agent_text_message("Checking OpenHands dependencies...", context_id=context_id)
-            )
-            loop = asyncio.get_event_loop()
             try:
-                await loop.run_in_executor(
-                    None,
-                    self._ensure_openhands_dependencies_installed,
-                    env,
-                )
-            except Exception as deps_error:
-                logger.error(f"Failed to ensure OpenHands dependencies are installed: {deps_error}", exc_info=True)
-                await event_queue.enqueue_event(
-                    new_agent_text_message(
-                        f"Error: Failed to install required OpenHands dependencies: {str(deps_error)}",
-                        context_id=context_id
-                    )
-                )
-                raise
-            
-            # Run OpenHands in a thread pool (since it's blocking)
-            await event_queue.enqueue_event(
-                new_agent_text_message("Running OpenHands agentic analysis...", context_id=context_id)
-            )
-            
-            # Run OpenHands synchronously in executor
-            await loop.run_in_executor(
-                None,
-                self._run_openhands_sync,
-                config_path,
-                prompt_file,
-                log_dir / "logs",
-                env,
-            )
-    
-    def _find_poetry(self) -> str:
-        """Find poetry executable."""
-        import shlex
-        
-        # Try multiple possible venv locations
-        possible_venv_paths = [
-            Path(__file__).parent.parent.parent / ".venv" / "bin" / "poetry",
-            Path.cwd() / ".venv" / "bin" / "poetry",
-            Path.home() / ".local" / "bin" / "poetry",
-        ]
-        
-        poetry_path = None
-        for venv_poetry in possible_venv_paths:
-            if venv_poetry.exists() and venv_poetry.is_file():
-                poetry_path = str(venv_poetry)
-                break
-        
-        if not poetry_path:
-            poetry_path = shutil.which("poetry")
-        
-        if not poetry_path:
-            raise FileNotFoundError(
-                f"Poetry not found. Tried: {[str(p) for p in possible_venv_paths]}. "
-                "Install with: uv pip install poetry"
-            )
-        
-        return poetry_path
-    
-    def _ensure_openhands_dependencies_installed(self, env: dict) -> None:
-        """Ensure critical OpenHands dependencies are installed in the Poetry environment."""
-        if not self.openhands_repo.exists():
-            raise FileNotFoundError(f"OpenHands repo not found: {self.openhands_repo}")
-        
-        poetry_path = self._find_poetry()
-        
-        # List of critical dependencies to check and install if missing
-        # These are packages that are commonly missing and cause import errors
-        critical_deps = [
-            ("termcolor", None),  # Required by logger.py
-            ("browsergym", "0.13.3"),  # Required by browsing agents
-        ]
-        
-        missing_deps = []
-        
-        # Check each dependency individually
-        for dep_name, dep_version in critical_deps:
-            check_cmd = [
-                poetry_path,
-                "run",
-                "python",
-                "-c",
-                f"import {dep_name}; print('{dep_name} OK')",
-            ]
-            try:
-                check_result = subprocess.run(
-                    check_cmd,
-                    cwd=self.openhands_repo,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,  # 30 second timeout for import check
-                )
+                # Estimate token count and trim if needed
+                total_chars = sum(len(msg.get("content", "")) for msg in state.messages)
+                if total_chars > 80000: # ~20k tokens
+                    logger.warning(f"[{context_id[:8]}] Large conversation, trimming...")
+                    # Keep system + task + last 10 messages
+                    state.messages = state.messages[:2] + state.messages[-10:]
                 
-                if check_result.returncode != 0:
-                    missing_deps.append((dep_name, dep_version))
-                    logger.warning(f"{dep_name} not found in Poetry environment")
-                else:
-                    logger.debug(f"{dep_name} is already installed")
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Timeout checking {dep_name}, assuming it's missing")
-                missing_deps.append((dep_name, dep_version))
-        
-        # Install missing dependencies
-        if missing_deps:
-            logger.info(f"Installing {len(missing_deps)} missing dependencies...")
-            for dep_name, dep_version in missing_deps:
-                # Use pip install within poetry environment to avoid dependency resolution issues
-                install_spec = f"{dep_name}=={dep_version}" if dep_version else dep_name
-                install_cmd = [
-                    poetry_path,
-                    "run",
-                    "pip",
-                    "install",
-                    install_spec,
-                ]
-                logger.info(f"Installing {dep_name}...")
+                # LLM call with rate limit retries
+                llm_message = await self._call_llm_with_retries(state.messages, context_id)
+                state.messages.append({"role": "assistant", "content": llm_message})
+                
+                # Try to parse as tool call
                 try:
-                    install_result = subprocess.run(
-                        install_cmd,
-                        cwd=self.openhands_repo,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,  # 5 minute timeout for installation
-                    )
-                except subprocess.TimeoutExpired:
-                    error_msg = (
-                        f"Timeout installing {dep_name} (exceeded 5 minutes).\n"
-                        f"This may indicate network issues or Poetry environment problems.\n"
-                        f"To fix manually, run:\n"
-                        f"  cd {self.openhands_repo}\n"
-                        f"  poetry run pip install {install_spec}"
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                if install_result.returncode != 0:
-                    error_msg = (
-                        f"Failed to install {dep_name}.\n"
-                        f"Installation error: {install_result.stderr}\n"
-                        f"Installation stdout: {install_result.stdout}\n"
-                        f"To fix manually, run:\n"
-                        f"  cd {self.openhands_repo}\n"
-                        f"  poetry run pip install {install_spec}"
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                logger.info(f"{dep_name} installed successfully")
-            
-            # Verify all dependencies are now installed
-            logger.info("Verifying all dependencies are installed...")
-            verify_cmd = [
-                poetry_path,
-                "run",
-                "python",
-                "-c",
-                "; ".join([f"import {name}" for name, _ in critical_deps]) + "; print('All dependencies OK')",
-            ]
+                    # Clean up LLM message if it wrapped JSON in code blocks
+                    cleaned_message = llm_message.strip()
+                    if "```json" in cleaned_message:
+                        cleaned_message = cleaned_message.split("```json")[1].split("```")[0].strip()
+                    elif "```" in cleaned_message:
+                        cleaned_message = cleaned_message.split("```")[1].split("```")[0].strip()
+                        
+                    tool_call = json.loads(cleaned_message)
+                    if tool_call.get("type") in ["bash_command", "done"]:
+                        if tool_call.get("type") == "done":
+                            logger.info(f"[{context_id[:8]}] Done signal received from LLM")
+                        else:
+                            logger.info(f"[{context_id[:8]}] Tool call: {tool_call.get('command', '')[:50]}...")
+                        return json.dumps(tool_call) # Ensure clean JSON return
+                    
+                    # If it's JSON but wrong type, ask to retry
+                    logger.warning(f"[{context_id[:8]}] LLM returned unknown type: {tool_call.get('type')}")
+                    state.messages.append({
+                        "role": "user", 
+                        "content": "Invalid 'type'. Please use 'bash_command' or 'done'."
+                    })
+                    
+                except json.JSONDecodeError:
+                    # Not JSON - try to extract it anyway
+                    json_match = re.search(r'\{.*"type".*\}', llm_message, re.DOTALL)
+                    if json_match:
+                        try:
+                            candidate = json.loads(json_match.group(0))
+                            if candidate.get("type") in ["bash_command", "done"]:
+                                return json.dumps(candidate)
+                        except:
+                            pass
+                            
+                    logger.warning(f"[{context_id[:8]}] LLM response was not valid JSON. Retrying...")
+                    state.messages.append({
+                        "role": "user",
+                        "content": "Your last response was not valid JSON. Please respond with ONLY a JSON object."
+                    })
+                    
+            except Exception as e:
+                logger.error(f"[{context_id[:8]}] Error in LLM turn: {e}", exc_info=True)
+                return json.dumps({"type": "done", "error": str(e)})
+        
+        # If we exhausted attempts
+        return json.dumps({"type": "done", "reason": "Exhausted retries for valid JSON"})
+
+    async def _call_llm_with_retries(self, messages: list[dict], context_id: str) -> str:
+        """Call LLM with exponential backoff for rate limits."""
+        import time
+        max_retries = 5
+        base_delay = 2.0
+        
+        for attempt in range(max_retries):
             try:
-                verify_result = subprocess.run(
-                    verify_cmd,
-                    cwd=self.openhands_repo,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,  # 30 second timeout for verification
+                response = self.llm_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.0,
                 )
-            except subprocess.TimeoutExpired:
-                error_msg = (
-                    f"Timeout verifying dependencies.\n"
-                    f"Please verify manually:\n"
-                    f"  cd {self.openhands_repo}\n"
-                    f"  poetry run python -c \"import termcolor; import browsergym\""
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            
-            if verify_result.returncode != 0:
-                error_msg = (
-                    f"Dependencies were installed but verification failed.\n"
-                    f"Verify stderr: {verify_result.stderr}\n"
-                    f"Verify stdout: {verify_result.stdout}\n"
-                    f"Please install manually:\n"
-                    f"  cd {self.openhands_repo}\n"
-                    f"  poetry run pip install {' '.join([f'{name}=={ver}' if ver else name for name, ver in critical_deps])}"
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            
-            logger.info("All critical dependencies installed and verified successfully")
-        else:
-            logger.info("All critical dependencies are already installed")
-    
-    def _run_openhands_sync(
-        self,
-        config_path: Path,
-        prompt_path: Path,
-        log_dir: Path,
-        env: dict,
-    ) -> None:
-        """Run OpenHands synchronously (called from executor)."""
-        import shlex
-        
-        if not self.openhands_repo.exists():
-            raise FileNotFoundError(f"OpenHands repo not found: {self.openhands_repo}")
-        
-        poetry_path = self._find_poetry()
-        
-        # Use poetry run - it handles the environment correctly
-        # Ensure we're in the OpenHands repo directory so Poetry finds the right pyproject.toml
-        cmd = [
-            poetry_path,
-            "run",
-            "python",
-            "-m",
-            "openhands.core.main",
-            "--config-file",
-            str(config_path.absolute()),
-            "--file",
-            str(prompt_path.absolute()),
-            "--max-iterations",
-            str(self.max_iter),
-        ]
-        
-        env["LOG_TO_FILE"] = "1"
-        env["LOG_DIR"] = str(log_dir.absolute())
-        env["LOG_ALL_EVENTS"] = "1"
-        
-        logger.info(f"Running OpenHands: {shlex.join(cmd)}")
-        logger.info(f"Working directory: {self.openhands_repo}")
-        
-        try:
-            # Only pass timeout if it's not None (None means no timeout)
-            run_kwargs = {
-                "cwd": self.openhands_repo,  # Critical: Poetry needs to be in the repo directory
-                "env": env,
-                "capture_output": True,
-                "text": True,
-            }
-            if self.timeout is not None:
-                run_kwargs["timeout"] = self.timeout
-            
-            result = subprocess.run(cmd, **run_kwargs)
-            
-            if result.returncode != 0:
-                logger.error(f"OpenHands failed with return code {result.returncode}")
-                logger.error(f"stdout: {result.stdout}")
-                logger.error(f"stderr: {result.stderr}")
-                raise RuntimeError(f"OpenHands failed: {result.stderr}")
-                
-        except subprocess.TimeoutExpired:
-            logger.error("OpenHands timed out")
-            raise TimeoutError("OpenHands analysis timed out")
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "429" in err_msg or "rate limit" in err_msg:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"[{context_id[:8]}] Rate limited, retrying in {delay}s...")
+                        await asyncio.sleep(delay)
+                        continue
+                raise
+        raise RuntimeError("Max retries exceeded for LLM call")
     
     def _extract_arvo_id(self, text: str) -> str | None:
         """Extract ARVO ID from task description."""
-        match = re.search(r'arvo:(\d+)', text)
-        if match:
-            return match.group(1)
-        return None
-    
-    def _extract_workspace_dir(self, text: str) -> str | None:
-        """Extract workspace directory from task description."""
-        match = re.search(r'Workspace Directory:\s*([^\n]+)', text)
-        if match:
-            return match.group(1).strip()
+        # Try multiple patterns
+        patterns = [
+            r'arvo:(\d+)',
+            r'Task ID: arvo:(\d+)',
+            r'arvo_id[:\s]+(\d+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
         return None
 
 
 class RCAFinderExecutor(AgentExecutor):
-    """Executor for the RCA Finder purple agent."""
+    """Executor for the simplified RCA Finder."""
     
     def __init__(
         self,
         model: str = "gpt-4o",
         api_key: str | None = None,
-        max_iter: int = 50,  # Increased from 30 to allow more thorough analysis
-        timeout: int | None = None,  # None = no timeout, allows indefinite execution
-        openhands_repo: Path | None = None,
+        trace_conversation: bool = False,
     ):
         self.finder = RCAFinder(
             model=model,
             api_key=api_key,
-            max_iter=max_iter,
-            timeout=timeout,
-            openhands_repo=openhands_repo,
+            trace_conversation=trace_conversation,
         )
     
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Execute the task handling."""
+        """Execute task handling."""
         await self.finder.handle_task(context, event_queue)
     
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -578,22 +360,48 @@ class RCAFinderExecutor(AgentExecutor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run the A2A RCA finder agent with OpenHands.")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the server")
-    parser.add_argument("--port", type=int, default=9019, help="Port to bind the server")
-    parser.add_argument("--card-url", type=str, help="External URL to provide in the agent card")
-    parser.add_argument("--model", type=str, default="gpt-4o", help="OpenAI model to use (default: gpt-4o)")
-    parser.add_argument("--api-key", type=str, help="OpenAI API key (or use OPENAI_API_KEY env var)")
-    parser.add_argument("--max-iter", type=int, default=50, help="Max OpenHands iterations (default: 50)")
-    parser.add_argument("--timeout", type=int, default=None, help="OpenHands timeout in seconds (default: None = no timeout)")
-    parser.add_argument("--openhands-repo", type=str, help="Path to OpenHands repository")
+    """Main entry point for purple agent server."""
+    parser = argparse.ArgumentParser(description="RCA Finder (Purple Agent)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind")
+    parser.add_argument("--port", type=int, default=9019, help="Port to bind")
+    parser.add_argument("--card-url", type=str, help="External URL for agent card")
+    parser.add_argument("--model", type=str, default="gpt-4o", help="LLM model")
+    parser.add_argument("--api-key", type=str, help="API key (or use OPENAI_API_KEY)")
+    parser.add_argument("--trace", action="store_true", help="Enable conversation trace logging")
+    parser.add_argument("--trace-only", action="store_true", help="Show only trace, suppress other logs")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging (includes trace)")
     args = parser.parse_args()
     
-    openhands_repo = Path(args.openhands_repo) if args.openhands_repo else None
+    # If verbose is enabled, also enable trace
+    trace_enabled = args.trace or args.verbose or args.trace_only
+    
+    # If trace-only mode, suppress all other loggers
+    if args.trace_only:
+        # Suppress all loggers except trace
+        logging.getLogger().setLevel(logging.CRITICAL)
+        logging.getLogger("rca_finder").setLevel(logging.CRITICAL)
+        logging.getLogger("uvicorn").setLevel(logging.CRITICAL)
+        logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL)
+        logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
+        logging.getLogger("httpx").setLevel(logging.CRITICAL)
+        logging.getLogger("openai").setLevel(logging.CRITICAL)
+        logging.getLogger("a2a").setLevel(logging.CRITICAL)
+    
+    # Check if we're running in show-logs mode (stdout/stderr are visible)
+    # In that case, also enable trace automatically
+    if not trace_enabled:
+        import sys
+        # If stdout/stderr are not redirected, likely --show-logs is enabled
+        if sys.stdout.isatty() or (hasattr(sys.stdout, 'fileno') and sys.stdout.fileno() >= 0):
+            trace_enabled = True
+            logger.info("Trace mode auto-enabled (logs are visible)")
+    
+    if trace_enabled and not args.trace_only:
+        logger.info("✓ Trace mode enabled - conversation logs will be displayed")
     
     agent_card = AgentCard(
         name="RCAFinder",
-        description="Performs root cause analysis on vulnerable codebases using OpenHands agentic framework.",
+        description="Performs root cause analysis using bash commands.",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version="1.0.0",
         default_input_modes=["text"],
@@ -606,9 +414,7 @@ def main():
         agent_executor=RCAFinderExecutor(
             model=args.model,
             api_key=args.api_key,
-            max_iter=args.max_iter,
-            timeout=args.timeout,
-            openhands_repo=openhands_repo,
+            trace_conversation=trace_enabled,
         ),
         task_store=InMemoryTaskStore(),
     )
@@ -619,11 +425,15 @@ def main():
     )
     
     import uvicorn
+    # Disable access logging in trace-only mode
+    log_level = "critical" if args.trace_only else "info"
     uvicorn.run(
         server.build(),
         host=args.host,
         port=args.port,
-        timeout_keep_alive=None,  # No timeout - allows long-running RCA analysis
+        timeout_keep_alive=300,  # 5 minutes - long enough for agent interactions
+        log_level=log_level,
+        access_log=not args.trace_only,
     )
 
 
