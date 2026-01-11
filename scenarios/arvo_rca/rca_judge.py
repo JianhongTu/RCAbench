@@ -41,11 +41,13 @@ except ImportError:
     from tools.turn_manager import TurnManager
     from tools.end_conditions import EndConditionChecker
 
-# Import EvalReport from rcabench
+# Import EvalReport and ground truth utilities from rcabench
 try:
-    from rcabench.server.eval_utils import EvalReport, evaluate_localization, get_ground_truth, Localization, LineSpan
+    from rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan
+    from rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
 except ImportError:
-    from src.rcabench.server.eval_utils import EvalReport, evaluate_localization, get_ground_truth, Localization, LineSpan
+    from src.rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan
+    from src.rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
 
 # Set up logging
 logging.basicConfig(
@@ -121,8 +123,12 @@ class RCAJudge(GreenAgent):
             result = await self._process_task(arvo_id, request.config, updater)
             results.append(result)
             
-            # Send result as a text message (artifacts not supported in update_status)
-            result_text = f"Task {arvo_id} complete:\n{json.dumps(result.model_dump(), indent=2)}"
+            # Send simplified result in trace-only mode, full result otherwise
+            if self._trace_only:
+                result_text = f"Task {arvo_id} complete:\n{self._format_simple_result(result)}"
+            else:
+                result_text = f"Task {arvo_id} complete:\n{json.dumps(result.model_dump(), indent=2)}"
+            
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(result_text, context_id=updater.context_id)
@@ -143,6 +149,31 @@ class RCAJudge(GreenAgent):
             agent_paths = task_meta["agent_paths"]
             workspace_dir = agent_paths.workspace_dir
             shared_dir = agent_paths.shared_dir
+            
+            # FIRST: Check if ground truth exists for this task
+            logger.info(f"[{arvo_id}] Checking for ground truth...")
+            asset_path = str(agent_paths.agent_dir)
+            gts = get_ground_truth(arvo_id, asset_path=asset_path)
+            
+            if not gts:
+                logger.warning(f"[{arvo_id}] No ground truth found - skipping task")
+                return TaskResult(
+                    arvo_id=arvo_id,
+                    file_acc=0.0,
+                    func_topk_recall={},
+                    line_topk_recall={},
+                    line_iou_mean=0.0,
+                    line_proximity_mean=0.0,
+                    n_gt=0,
+                    n_pred=0,
+                    success=False,
+                    error="No ground truth available for this task",
+                )
+            
+            logger.info(f"[{arvo_id}] Found {len(gts)} ground truth localization(s)")
+            if self._trace_only:
+                for gt in gts:
+                    trace_logger.info(f"  GT: {gt.file} lines {gt.old_span.start}-{gt.old_span.end}")
             
             error_path = str(workspace_dir / f"{arvo_id}_error.txt")
             if not os.path.exists(error_path):
@@ -170,44 +201,36 @@ class RCAJudge(GreenAgent):
                 task_description=task_description,
             )
             
-            if loop_result.get("status") == "success" or os.path.exists(shared_dir / "loc.json"):
-                eval_report = await self._evaluate_task_results(arvo_id, shared_dir)
-                
-                reasoning_trace = None
-                reasoning_file = shared_dir / "reasoning.json"
-                if reasoning_file.exists():
-                    try:
-                        with open(reasoning_file, "r") as f:
-                            reasoning_trace = ReasoningTrace.model_validate(json.load(f))
-                    except Exception as e:
-                        logger.warning(f"Could not load reasoning trace: {e}")
-                
-                return TaskResult(
-                    arvo_id=arvo_id,
-                    file_acc=eval_report.file_acc,
-                    func_topk_recall=eval_report.func_topk_recall,
-                    line_topk_recall=eval_report.line_topk_recall,
-                    line_iou_mean=eval_report.line_iou_mean,
-                    line_proximity_mean=eval_report.line_proximity_mean,
-                    n_gt=eval_report.n_gt,
-                    n_pred=eval_report.n_pred,
-                    success=True,
-                    error=None,
-                    reasoning_trace=reasoning_trace,
-                )
-            else:
-                return TaskResult(
-                    arvo_id=arvo_id,
-                    file_acc=0.0,
-                    func_topk_recall={},
-                    line_topk_recall={},
-                    line_iou_mean=0.0,
-                    line_proximity_mean=0.0,
-                    n_gt=0,
-                    n_pred=0,
-                    success=False,
-                    error=loop_result.get("reason", "No submission found"),
-                )
+            # Always evaluate to get metrics, even if agent didn't submit predictions
+            # Ground truth was already fetched earlier, pass it through
+            eval_report = await self._evaluate_task_results(arvo_id, shared_dir, workspace_dir, agent_paths, gts)
+            
+            reasoning_trace = None
+            reasoning_file = shared_dir / "reasoning.json"
+            if reasoning_file.exists():
+                try:
+                    with open(reasoning_file, "r") as f:
+                        reasoning_trace = ReasoningTrace.model_validate(json.load(f))
+                except Exception as e:
+                    logger.warning(f"Could not load reasoning trace: {e}")
+            
+            # Check if submission was successful
+            has_predictions = os.path.exists(shared_dir / "loc.json")
+            success = loop_result.get("status") == "success" or has_predictions
+            
+            return TaskResult(
+                arvo_id=arvo_id,
+                file_acc=eval_report.file_acc,
+                func_topk_recall=eval_report.func_topk_recall,
+                line_topk_recall=eval_report.line_topk_recall,
+                line_iou_mean=eval_report.line_iou_mean,
+                line_proximity_mean=eval_report.line_proximity_mean,
+                n_gt=eval_report.n_gt,
+                n_pred=eval_report.n_pred,
+                success=success,
+                error=None if has_predictions else loop_result.get("reason", "No submission found"),
+                reasoning_trace=reasoning_trace,
+            )
                 
         except Exception as e:
             logger.error(f"Error processing task {arvo_id}: {e}", exc_info=True)
@@ -345,12 +368,20 @@ loc.json format:
 }}
 """
 
-    async def _evaluate_task_results(self, arvo_id: str, shared_dir: Path) -> Any:
+    
+    async def _evaluate_task_results(self, arvo_id: str, shared_dir: Path, workspace_dir: Path, agent_paths, gts: List[Localization]) -> Any:
         """Evaluate the localization results against ground truth."""
         loc_file = shared_dir / "loc.json"
+        
+        # Ground truth was already fetched and validated before running the task
+        # Now augment it with derived function names
+        logger.info(f"[{arvo_id}] Augmenting ground truth with function names...")
+        gts = augment_ground_truth_with_functions(gts, workspace_dir, trace_only=self._trace_only)
+        
         if not loc_file.exists():
             if self._trace_only:
                 trace_logger.info(f"\n[PREDICTIONS] No loc.json file found")
+                self._show_ground_truth_and_results([], gts, 0, 0)
             return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=0, n_pred=0, per_gt=[])
             
         with open(loc_file, "r") as f:
@@ -373,11 +404,63 @@ loc.json format:
                         new_span=LineSpan(start=line, end=line),
                         function=loc.get("function", "")
                     ))
-                gts = get_ground_truth(arvo_id)
-                return evaluate_localization(preds, gts)
+                
+                # Evaluate
+                eval_report = evaluate_localization(preds, gts)
+                
+                # Show ground truth and simplified results in trace-only mode
+                if self._trace_only:
+                    file_acc = eval_report.file_acc
+                    func_acc = eval_report.func_topk_recall.get("1", 0.0)  # top-1 function recall
+                    self._show_ground_truth_and_results(preds, gts, file_acc, func_acc)
+                
+                return eval_report
             except Exception as e:
                 logger.error(f"Error evaluating localizations: {e}")
                 return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=0, n_pred=0, per_gt=[])
+    
+    def _show_ground_truth_and_results(self, preds: list, gts: list, file_acc: float, func_acc: float):
+        """Show ground truth and simplified evaluation results in trace output."""
+        # Show ground truth
+        trace_logger.info(f"\n[GROUND TRUTH] Expected localizations:")
+        if not gts:
+            trace_logger.info("  (No ground truth available for this task)")
+        else:
+            gt_simple = []
+            for gt in gts:
+                gt_simple.append({
+                    "file": gt.file,
+                    "function": gt.function,
+                    "line": gt.old_span.start if gt.old_span else "N/A"
+                })
+            trace_logger.info(json.dumps(gt_simple, indent=2))
+        
+        # Show simplified results
+        trace_logger.info(f"\n[EVALUATION RESULTS]")
+        n_gt = len(gts)
+        n_pred = len(preds)
+        
+        if n_gt > 0:
+            file_correct = int(file_acc * n_gt)
+            func_correct = int(func_acc * n_gt)
+            trace_logger.info(f"Files: {file_correct}/{n_gt} correct ({file_acc*100:.1f}%)")
+            trace_logger.info(f"Functions: {func_correct}/{n_gt} correct ({func_acc*100:.1f}%)")
+        else:
+            trace_logger.info(f"No ground truth available for evaluation")
+        trace_logger.info(f"Predictions submitted: {n_pred}")
+    
+    def _format_simple_result(self, result: TaskResult) -> str:
+        """Format a TaskResult with only the key metrics."""
+        simple_result = {
+            "arvo_id": result.arvo_id,
+            "file_acc": f"{result.file_acc*100:.1f}%",
+            "func_acc": f"{result.func_topk_recall.get('1', 0.0)*100:.1f}%",
+            "n_gt": result.n_gt,
+            "n_pred": result.n_pred,
+            "success": result.success,
+            "error": result.error
+        }
+        return json.dumps(simple_result, indent=2)
 
 async def main():
     parser = argparse.ArgumentParser(description="RCA Judge (Green Agent)")

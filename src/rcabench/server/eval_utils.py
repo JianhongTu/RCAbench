@@ -2,15 +2,16 @@
 eval_utils.py
 
 This module contains utilities for evaluation in the RCAbench server, including data models
-for localization results and ground truth.
+for localization results and evaluation metrics.
+
+Note: Ground truth extraction functions have been moved to ground_truth_utils.py
 """
 
 from pydantic import BaseModel
 from typing import List, Tuple, Dict
 import os
 import re
-
-from rcabench.utils import remote_fetch_diff
+import math
 
 
 class LineSpan(BaseModel):
@@ -47,83 +48,6 @@ class Localization(BaseModel):
             ),
             function=data.get("function", ""),
         )
-
-
-FILE_BLOCK_RE = re.compile(
-    r"^diff\s[^\n]*\n(?:^---\s+a/.*\n^\+\+\+\s+b/([^\s]+)[^\n]*\n)", re.MULTILINE
-)
-HUNK_RE = re.compile(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", re.MULTILINE)
-
-CODE_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".rs", ".go", ".py"}
-
-
-def _is_code_file(path: str) -> bool:
-    base = os.path.basename(path)
-    if base.lower() in {"changelog"}:
-        return False
-    ext = os.path.splitext(base)[1].lower()
-    if ext in {".htm", ".html", ".md"}:
-        return False
-    return ext in CODE_EXTS
-
-
-def _iter_file_blocks(diff: str):
-    """
-    Yield (filepath, block_text) for each file-level diff block.
-    We anchor on 'diff ...' then consume until next 'diff ...' or end.
-    """
-    # Find all file headers with captured b/<path>
-    headers = list(FILE_BLOCK_RE.finditer(diff))
-    for i, m in enumerate(headers):
-        path = m.group(1) or ""
-        start = m.start()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(diff)
-        yield path.strip(), diff[start:end]
-
-
-def get_ground_truth(arvo_id: str, asset_path: str = "./tmp") -> List[Localization]:
-    """
-    Partition patch.diff into file blocks, then into hunks.
-    Emit one Localization per code hunk (post-patch start line).
-
-    Fetches the diff file from remote repository and parses it for ground truth.
-    """
-    task_id = arvo_id if arvo_id.startswith("arvo:") else f"arvo:{arvo_id}"
-
-    # Fetch diff file to a temporary location
-    diff_path = remote_fetch_diff(arvo_id, use_temp_file=True)
-
-    try:
-        with open(diff_path, "r", encoding="utf-8", errors="ignore") as f:
-            diff = f.read()
-    finally:
-        # Clean up the temporary file
-        try:
-            os.unlink(diff_path)
-        except OSError:
-            pass  # Ignore if file was already cleaned up
-
-    locs: List[Localization] = []
-    for filepath, block in _iter_file_blocks(diff):
-        if not filepath or not _is_code_file(filepath):
-            continue
-        for h in HUNK_RE.finditer(block):
-            old_start = int(h.group(1))
-            old_count = int(h.group(2)) if h.group(2) else 1
-            new_start = int(h.group(3))
-            new_count = int(h.group(4)) if h.group(4) else 1
-            old_span = LineSpan(start=old_start, end=old_start + old_count - 1)
-            new_span = LineSpan(start=new_start, end=new_start + new_count - 1)
-            locs.append(
-                Localization(
-                    task_id=task_id,
-                    file=filepath,
-                    old_span=old_span,
-                    new_span=new_span,
-                    function="",  # TODO: extract function name via symbols
-                )
-            )
-    return locs
 
 
 def _normalize_file_path(path: str) -> str:
@@ -257,7 +181,6 @@ def _line_proximity(a: LineSpan, b: LineSpan) -> float:
     
     # Exponential decay: score = e^(-normalized_distance)
     # This gives 1.0 for same location, ~0.37 for 1x distance, ~0.14 for 2x distance
-    import math
     proximity = math.exp(-normalized_distance / 2.0)  # Divide by 2 to make decay slower
     
     return proximity
