@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jt-interactive
+  containers:
+  - name: agent
+    image: tovitu/sweagent
+    imagePullPolicy: Always
+    command: ["/bin/bash"]
+    tty: true
+    stdin: true
+    env:
+    - name: PYTHONPATH
+      value: /data
+    - name: MSWEA_GLOBAL_CONFIG_DIR
+      value: /data/.config/mini-swe-agent
+    volumeMounts:
+    - name: my-volume
+      mountPath: /data
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "2"
+  - name: dev
+    image: n132/arvo:10252-vul
+    imagePullPolicy: Always
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y socat curl && socat TCP-LISTEN:9000,reuseaddr,fork EXEC:/bin/bash,stderr"]
+    env:
+    - name: COMMAND_PORT
+      value: "9000"
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "2"
+      limits:
+        memory: "4Gi"
+        cpu: "4"
+  volumes:
+  - name: my-volume
+    persistentVolumeClaim:
+      claimName: jt-shared
