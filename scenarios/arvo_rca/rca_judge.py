@@ -382,7 +382,8 @@ loc.json format:
             if self._trace_only:
                 trace_logger.info(f"\n[PREDICTIONS] No loc.json file found")
                 self._show_ground_truth_and_results([], gts, 0, 0)
-            return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=0, n_pred=0, per_gt=[])
+            # Return correct n_gt count even when there are no predictions
+            return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=len(gts), n_pred=0, per_gt=[])
             
         with open(loc_file, "r") as f:
             try:
@@ -396,12 +397,26 @@ loc.json format:
                 locations_data = data.get("locations", [])
                 preds = []
                 for loc in locations_data:
-                    line = loc.get("line", 0)
+                    # Support both new range format (line_start/line_end) and legacy single line format
+                    if "line_start" in loc and "line_end" in loc:
+                        line_start = loc.get("line_start", 0)
+                        line_end = loc.get("line_end", 0)
+                        
+                        # Validate range size (max 100 lines)
+                        if line_end - line_start > 100:
+                            logger.warning(f"[{arvo_id}] Prediction range too large ({line_end - line_start} lines), capping to 100 lines")
+                            line_end = line_start + 100
+                    else:
+                        # Legacy format: single line number
+                        line = loc.get("line", 0)
+                        line_start = line
+                        line_end = line
+                    
                     preds.append(Localization(
                         task_id=arvo_id,
                         file=loc.get("file", ""),
-                        old_span=LineSpan(start=line, end=line),
-                        new_span=LineSpan(start=line, end=line),
+                        old_span=LineSpan(start=line_start, end=line_end),
+                        new_span=LineSpan(start=line_start, end=line_end),
                         function=loc.get("function", "")
                     ))
                 
@@ -417,7 +432,7 @@ loc.json format:
                 return eval_report
             except Exception as e:
                 logger.error(f"Error evaluating localizations: {e}")
-                return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=0, n_pred=0, per_gt=[])
+                return EvalReport(task_id=arvo_id, file_acc=0.0, func_topk_recall={}, line_topk_recall={}, line_iou_mean=0.0, line_proximity_mean=0.0, n_gt=len(gts), n_pred=0, per_gt=[])
     
     def _show_ground_truth_and_results(self, preds: list, gts: list, file_acc: float, func_acc: float):
         """Show ground truth and simplified evaluation results in trace output."""
@@ -430,8 +445,8 @@ loc.json format:
             for gt in gts:
                 gt_simple.append({
                     "file": gt.file,
-                    "function": gt.function,
-                    "line": gt.old_span.start if gt.old_span else "N/A"
+                    "function": gt.function if gt.function else "(function not found)",
+                    "lines": f"{gt.old_span.start}-{gt.old_span.end}" if gt.old_span else "N/A"
                 })
             trace_logger.info(json.dumps(gt_simple, indent=2))
         
@@ -445,6 +460,19 @@ loc.json format:
             func_correct = int(func_acc * n_gt)
             trace_logger.info(f"Files: {file_correct}/{n_gt} correct ({file_acc*100:.1f}%)")
             trace_logger.info(f"Functions: {func_correct}/{n_gt} correct ({func_acc*100:.1f}%)")
+            
+            # Calculate line overlaps
+            line_overlaps = 0
+            for pred in preds:
+                for gt in gts:
+                    # Check if same file first
+                    if pred.file == gt.file or pred.file.endswith(gt.file) or gt.file.endswith(pred.file):
+                        # Check for range overlap
+                        if not (pred.old_span.end < gt.old_span.start or pred.old_span.start > gt.old_span.end):
+                            line_overlaps += 1
+                            break  # Count each prediction at most once
+            
+            trace_logger.info(f"Line ranges: {line_overlaps}/{n_gt} overlapped with ground truth")
         else:
             trace_logger.info(f"No ground truth available for evaluation")
         trace_logger.info(f"Predictions submitted: {n_pred}")

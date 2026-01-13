@@ -302,6 +302,7 @@ def get_ground_truth(arvo_id: str, asset_path: str = "./tmp") -> List[Localizati
 def derive_function_name(file_path: Path, line_number: int, trace_only: bool = False) -> str:
     """
     Use tree-sitter to derive the function name containing the given line number.
+    Falls back to regex-based search if tree-sitter fails.
     
     Args:
         file_path: Path to the source file
@@ -373,7 +374,48 @@ def derive_function_name(file_path: Path, line_number: int, trace_only: bool = F
             return None
         
         result = find_function_at_position(tree.root_node, byte_offset)
-        return result if result else ""
+        
+        # If tree-sitter found a function, return it
+        if result:
+            return result
+        
+        # FALLBACK: Tree-sitter failed (likely due to parsing errors in complex C code)
+        # Use regex to search backwards for function definition
+        import re
+        
+        # C function definition pattern: return_type function_name(...) {
+        # Must start at or near column 0 (max 2 spaces indent) to be a real function
+        func_pattern = re.compile(
+            r'^[ ]{0,2}'  # Max 2 spaces of indentation
+            r'(?:static\s+|inline\s+|extern\s+|const\s+)*'  # Optional qualifiers
+            r'(?:[\w]+\s+)+'  # Return type words (e.g., "unsigned int"), at least one
+            r'[\*\s]*'  # Optional pointers and spaces
+            r'(\w+)\s*\('  # Capture: function_name followed by (
+            r'[^{;]*?'  # Parameters (non-greedy, no { or ; before closing)
+            r'\)\s*(?:__attribute__[^{]*)?'  # Closing paren, optional attributes
+            r'\s*\{',  # Opening brace
+            re.MULTILINE
+        )
+        
+        # C keywords to filter out (not function names)
+        c_keywords = {'if', 'while', 'for', 'switch', 'return', 'sizeof', 'typeof', 'else'}
+        
+        # Search backwards from target line
+        text_lines = [line.decode('utf-8', errors='ignore') for line in lines]
+        
+        # Look backwards up to 1000 lines or start of file
+        search_start = max(0, line_number - 1000)
+        search_text = '\n'.join(text_lines[search_start:line_number])
+        
+        # Find all function definitions before the target line
+        matches = [m for m in func_pattern.finditer(search_text) 
+                   if m.group(1).lower() not in c_keywords]
+        
+        if matches:
+            # Return the last (closest) match
+            return matches[-1].group(1)
+        
+        return ""
         
     except Exception as e:
         # Silently return empty string on error
@@ -403,21 +445,38 @@ def augment_ground_truth_with_functions(gts: List[Localization], workspace_dir: 
             continue
         
         # Try to derive function name from source code
-        # Ground truth file paths are relative (e.g., "src/njs_regexp.c")
+        # Ground truth file paths are relative (e.g., "coders/png.c" or "src/njs_regexp.c")
         # We need to find the actual file in src-vul directory
         gt_file_path = src_vul_dir / gt.file
         
-        # Also try without "src/" prefix if file has it
-        if not gt_file_path.exists() and gt.file.startswith("src/"):
-            gt_file_path = src_vul_dir / gt.file[4:]
-        
-        # Try common patterns for finding the file
+        # Strategy 1: Try direct path
         if not gt_file_path.exists():
-            # Try glob search within src-vul
+            # Strategy 2: Try without "src/" prefix if file has it
+            if gt.file.startswith("src/"):
+                gt_file_path = src_vul_dir / gt.file[4:]
+        
+        # Strategy 3: Search recursively matching the path structure
+        if not gt_file_path.exists():
             filename = os.path.basename(gt.file)
+            relative_parts = Path(gt.file).parts  # Get path components (e.g., ("coders", "png.c"))
+            
+            # Search for files matching this pattern
             possible_files = list(src_vul_dir.glob(f"**/{filename}"))
             if possible_files:
-                gt_file_path = possible_files[0]
+                # Try to find the best match based on path structure
+                best_match = None
+                for candidate in possible_files:
+                    candidate_parts = candidate.relative_to(src_vul_dir).parts
+                    
+                    # Check if the candidate path ends with the same relative path structure
+                    # If the GT path is "coders/png.c", check if candidate ends with "coders/png.c"
+                    if len(candidate_parts) >= len(relative_parts):
+                        if candidate_parts[-len(relative_parts):] == relative_parts:
+                            best_match = candidate
+                            break
+                
+                # Use best match if found, otherwise fall back to first match
+                gt_file_path = best_match if best_match else possible_files[0]
         
         if gt_file_path.exists():
             # Use the middle of the span for function lookup

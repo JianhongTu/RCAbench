@@ -25,12 +25,12 @@ class TurnManager:
     Manages turn counting and limits for the tool calling loop.
     """
     
-    def __init__(self, max_turns: int = 50):
+    def __init__(self, max_turns: int = 150):
         """
         Initialize turn manager.
         
         Args:
-            max_turns: Maximum number of turns allowed
+            max_turns: Maximum number of turns allowed (default: 150)
         """
         self.max_turns = max_turns
         self.turn_count = 0

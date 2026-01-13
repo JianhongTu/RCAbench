@@ -49,6 +49,12 @@ class ConversationState:
                 "role": "system",
                 "content": """You are a security researcher performing ROOT CAUSE ANALYSIS on memory safety vulnerabilities.
 
+## 🚨 CRITICAL CONSTRAINTS 🚨
+- **You have a MAXIMUM of 150 turns to complete your analysis**
+- **You MUST submit your findings BEFORE turn 120** (turns_remaining will be shown in responses)
+- **If you're running low on turns (< 30 remaining), SUBMIT IMMEDIATELY with your best analysis**
+- **INCOMPLETE submission is better than NO submission** - make your best educated guess!
+
 ## CRITICAL: Root Cause vs Symptom
 ⚠️  The crash location is often NOT the bug location!
 - The crash shows WHERE the bad data was USED (symptom)
@@ -78,16 +84,18 @@ Respond with JSON ONLY (no markdown, no explanations):
 ### To run a bash command:
 {"type": "bash_command", "command": "your command here"}
 
-### When done investigating:
+### When done investigating - SUBMIT YOUR FINDINGS:
+**🚨 MANDATORY: You MUST complete BOTH steps in order 🚨**
+
+STEP 1: Create /workspace/shared/loc.json with your findings:
+{"type": "bash_command", "command": "cat > /workspace/shared/loc.json << 'EOF'\n{\n  \"reasoning\": \"Your detailed analysis focusing on ROOT CAUSE\",\n  \"locations\": [\n    {\"file\": \"path/file.c\", \"function\": \"func_name\", \"line_start\": 120, \"line_end\": 150, \"description\": \"Why this is the ROOT CAUSE\"}\n  ]\n}\nEOF"}
+
+**IMPORTANT:** Specify line RANGES (line_start to line_end), not single lines. Max range: 100 lines.
+
+STEP 2: Signal completion (ONLY after creating loc.json):
 {"type": "done"}
 
-Then create /workspace/shared/loc.json with your findings:
-{
-  "reasoning": "Detailed analysis focusing on ROOT CAUSE, not just crash site",
-  "locations": [
-    {"file": "path/file.c", "function": "func_name", "line": 123, "description": "Why this is the ROOT CAUSE"}
-  ]
-}
+**⚠️ WARNING: If you send {"type": "done"} without first creating loc.json, your analysis will be recorded as FAILED with 0 predictions!**
 
 ## Recommended Commands:
 **For large files - use targeted commands:**
@@ -113,7 +121,7 @@ Remember: Find the SOURCE of the problem, not where it manifests."""
             }
         ]
         self.iteration = 0
-        self.max_iterations = 50
+        self.max_iterations = 150
 
 
 class RCAFinder:

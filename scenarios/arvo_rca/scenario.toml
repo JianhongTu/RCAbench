@@ -10,6 +10,7 @@ cmd = "python scenarios/arvo_rca/rca_finder.py --host 127.0.0.1 --port 9019 --tr
 [config]
 task_ids_file = "data/arvo_hf_task_ids.txt"
 num_tasks = 1
+max_turns = 150
 
 
 
