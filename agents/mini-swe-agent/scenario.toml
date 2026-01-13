@@ -1,0 +1,14 @@
+[green_agent]
+endpoint = "http://127.0.0.1:9009"
+cmd = "python green_agent_server.py --port 9009 --purple-agent-url http://127.0.0.1:9019/"
+
+[[participants]]
+role = "purple_agent"
+endpoint = "http://127.0.0.1:9019"
+cmd = "python purple_agent_server.py --port 9019 --green-agent-url http://127.0.0.1:9009/"
+
+[config]
+# List of ARVO task IDs to test
+task_ids = [14368]
+# Or load from file (uncomment to use):
+# task_ids_file = "data/good_arvo_task_ids.json"
