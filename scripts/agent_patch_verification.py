@@ -141,149 +141,6 @@ spec:
 """
 
 RESULTS_DIR = "./data/agent_patch_verification_results"
-DB_PATH = "./data/agent_patch_verification.db"
-
-
-class AgentPatchVerificationDB:
-    """Database for storing agent-based patch verification results."""
-
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
-        self._init_db()
-
-    def _init_db(self):
-        """Initialize the database schema."""
-        import sqlite3
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agent_patch_verification (
-                task_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,  -- 'pending', 'running', 'success', 'failed'
-                error_message TEXT,
-                k8s_job_name TEXT,
-                start_time TIMESTAMP,
-                end_time TIMESTAMP,
-                retry_count INTEGER DEFAULT 0
-            )
-        """
-        )
-
-        conn.commit()
-        conn.close()
-
-    def insert_or_update_result(self, task_id: str, **kwargs):
-        """Insert or update a verification result."""
-        import sqlite3
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT 1 FROM agent_patch_verification WHERE task_id = ?", (task_id,))
-        exists = cursor.fetchone()
-
-        if exists:
-            set_parts = [f"{k} = ?" for k in kwargs.keys()]
-            values = list(kwargs.values()) + [task_id]
-            cursor.execute(
-                f"UPDATE agent_patch_verification SET {', '.join(set_parts)} WHERE task_id = ?",
-                values,
-            )
-        else:
-            columns = ["task_id"] + list(kwargs.keys())
-            placeholders = ["?"] * len(columns)
-            values = [task_id] + list(kwargs.values())
-            cursor.execute(
-                f"INSERT INTO agent_patch_verification ({', '.join(columns)}) VALUES ({', '.join(placeholders)})",
-                values,
-            )
-
-        conn.commit()
-        conn.close()
-
-    def get_result(self, task_id: str) -> Optional[Dict]:
-        """Get verification result for a task."""
-        import sqlite3
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """SELECT task_id, status, error_message, k8s_job_name, 
-                      start_time, end_time, retry_count 
-               FROM agent_patch_verification WHERE task_id = ?""",
-            (task_id,)
-        )
-        row = cursor.fetchone()
-        conn.close()
-
-        if row:
-            columns = [
-                "task_id",
-                "status",
-                "error_message",
-                "k8s_job_name",
-                "start_time",
-                "end_time",
-                "retry_count",
-            ]
-            return dict(zip(columns, row))
-        return None
-
-    def get_successful_tasks(self) -> List[str]:
-        """Get list of tasks that have been successfully verified."""
-        import sqlite3
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT task_id FROM agent_patch_verification
-            WHERE status = 'success'
-        """
-        )
-        rows = cursor.fetchall()
-        conn.close()
-
-        return [row[0] for row in rows]
-
-    def get_tasks_exceeding_retry_limit(self, max_retries: int = 2) -> List[str]:
-        """Get list of tasks that have exceeded retry limit."""
-        import sqlite3
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            f"""
-            SELECT task_id FROM agent_patch_verification
-            WHERE retry_count >= {max_retries}
-        """
-        )
-        rows = cursor.fetchall()
-        conn.close()
-
-        return [row[0] for row in rows]
-
-    def should_skip_task(self, task_id: str, max_retries: int = 2) -> tuple:
-        """Check if a task should be skipped. Returns (should_skip, reason)."""
-        result = self.get_result(task_id)
-        
-        if not result:
-            return False, ""
-        
-        if result["status"] == "success":
-            return True, "already verified successfully"
-        
-        retry_count = int(result["retry_count"]) if result["retry_count"] is not None else 0
-        if retry_count >= max_retries:
-            return True, f"exceeded retry limit (retry_count={retry_count})"
-        
-        return False, ""
 
 
 def submit_k8s_job(
@@ -314,21 +171,36 @@ def submit_k8s_job(
     
     # Construct agent command - runs mini-swe-agent with sidecar
     agent_command = (
-        f"sleep 1 && "
+        f"timeout 240 bash -c '"
+        f"echo \\\"Waiting for dev container at localhost:{command_port}...\\\" && "
+        f"for i in {{1..240}}; do "
+        f"if echo \\\"echo test\\\" | nc -w 2 localhost {command_port} | grep -q \\\"test\\\"; then "
+        f"echo \\\"Dev container is ready and responding after ${{i}}s\\\" && "
+        f"exit 0; "
+        f"fi && "
+        f"if [ $((i % 10)) -eq 0 ]; then "
+        f"echo \\\"Still waiting... (${{i}}s)\\\"; "
+        f"fi && "
+        f"sleep 1; "
+        f"done && "
+        f"echo \\\"Timeout: Dev container not ready after 240s\\\" && "
+        f"exit 1' && "
         f"python src/minisweagent/run/sidecar_headless.py "
         f"-c config/sidecar.yaml -s "
         f"-t 'Given a patch file /tmp/patch.diff and a vulnerable source codebase, "
         f"your job is to create a minimal and working patch file in /tmp to fix the vulnerability. "
+        f"You are provided with a standarded interfact to test and validate your patch, using arvo compile and arvo fuzzer. "
         f"Todos: 1) identify the source directory via pwd and verify that git has been initialized. "
         f"2) try apply the patch as it is using patch -p1 < /tmp/patch.diff and observe errors. "
         f"3) go through changes in /tmp/patch.diff one by one and determine if it is necessary to fix the vulnerability. "
         f"changes applied to changelog or tests may not be necessary. "
         f"4) since the patch application is likely to fail due to context changes, manually examine the code regions and apply each necessary updates with minimal changes to avoid regression. "
-        f"5) run arvo compile && arvo to verify that the program compiles and the vulnerability no longer exists. "
-        f"6) create a single new commit and generate a {task_id}.diff file in /data/verified_tasks directory. "
-        f"7) create {task_id}.json in /data/verification_results with fields: task_id, list of modified files (List[str]), list of modified functions (List[str]), patch status (bool), compilation status (bool), fuzzer status (bool), and a short summary of what failed (str)."
+        f"5) run arvo compile to verify that the program compiles. "
+        f"6) run arvo to verify that the vulnerability is fixed by checking the returned code is 0. "
+        f"7) create a single new commit and generate a {task_id}.diff file in /data/verified_tasks directory. "
+        f"8) create {task_id}.json in /data/verification_results with fields: task_id, list of modified files (List[str]), list of modified functions (List[str]), patch status (bool), compilation status (bool), fuzzer status (bool), and a short summary of what failed (str)."
         f"Note: if adapting the patch requires significant engineering effort, abort the task because the patch maybe unsound.' "
-        f"-m glm-4.6 --timeout 300; "
+        f"-m glm-4.7 --timeout 300; "
         f"touch /tmp/coordination/agent_done"
     )
     
@@ -446,24 +318,17 @@ def get_job_logs(job_name: str, namespace: str, container: str = "agent") -> str
 def verify_single_task(
     task_id: str,
     namespace: str,
-    db: AgentPatchVerificationDB,
     patch_url: str,
     agent_image: str = "tovitu/sweagent",
     pvc_name: str = "jt-shared",
     command_port: int = 9000,
     dev_memory_request: int = 2,
     dev_cpu_request: int = 2,
-    max_retries: int = 2,
 ):
     """Verify a single task using agent-based patching with sidecar pattern."""
     print(f"\n{'='*60}")
     print(f"Agent verifying task: {task_id}")
     print("=" * 60)
-
-    should_skip, reason = db.should_skip_task(task_id, max_retries)
-    if should_skip:
-        print(f"Task {task_id} skipped: {reason}")
-        return
 
     try:
         job_name = submit_k8s_job(
@@ -475,14 +340,6 @@ def verify_single_task(
             command_port=command_port,
             dev_memory_request=dev_memory_request,
             dev_cpu_request=dev_cpu_request,
-        )
-        existing = db.get_result(task_id)
-        db.insert_or_update_result(
-            task_id,
-            status="running",
-            k8s_job_name=job_name,
-            start_time=time.time(),
-            retry_count=(existing["retry_count"] + 1) if existing else 0,
         )
 
         print(f"Waiting for sidecar pod {job_name} to complete...")
@@ -497,9 +354,6 @@ def verify_single_task(
         success = job_status == "success"
 
         final_status = "success" if success else "failed"
-        db.insert_or_update_result(
-            task_id, status=final_status, end_time=time.time()
-        )
 
         print(f"Task {task_id}: {final_status.upper()}")
 
@@ -519,9 +373,6 @@ def verify_single_task(
 
     except Exception as e:
         print(f"Failed to verify task {task_id}: {e}")
-        db.insert_or_update_result(
-            task_id, status="failed", end_time=time.time()
-        )
 def load_task_list(task_list_file: str) -> List[str]:
     """Load task IDs from a file."""
     with open(task_list_file, "r") as f:
@@ -539,8 +390,6 @@ async def monitor_job(
     task_id: str,
     pod_name: str,
     namespace: str,
-    db: AgentPatchVerificationDB,
-    max_retries: int,
 ):
     """Monitor a single pod asynchronously."""
     try:
@@ -559,9 +408,6 @@ async def monitor_job(
         success = job_status == "success"
 
         final_status = "success" if success else "failed"
-        db.insert_or_update_result(
-            task_id, status=final_status, end_time=time.time()
-        )
 
         print(f"Task {task_id}: {final_status.upper()}")
 
@@ -587,31 +433,21 @@ async def monitor_job(
 
     except Exception as e:
         print(f"Failed to monitor pod {task_id}: {e}")
-        db.insert_or_update_result(
-            task_id, status="failed", end_time=time.time()
-        )
         return task_id, "failed"
 
 
 async def submit_and_monitor_task(
     task_id: str,
     namespace: str,
-    db: AgentPatchVerificationDB,
     patch_url: str,
     agent_image: str,
     pvc_name: str,
     command_port: int,
     dev_memory_request: int,
     dev_cpu_request: int,
-    max_retries: int,
 ) -> tuple:
     """Submit a Job and start monitoring it."""
     try:
-        should_skip, reason = db.should_skip_task(task_id, max_retries)
-        if should_skip:
-            print(f"Task {task_id} skipped: {reason}")
-            return task_id, "skipped"
-
         pod_name = await asyncio.get_event_loop().run_in_executor(
             None,
             submit_k8s_job,
@@ -625,29 +461,16 @@ async def submit_and_monitor_task(
             dev_cpu_request,
         )
 
-        existing = db.get_result(task_id)
-        db.insert_or_update_result(
-            task_id,
-            status="running",
-            k8s_job_name=pod_name,
-            start_time=time.time(),
-            retry_count=(existing["retry_count"] + 1) if existing else 0,
-        )
-
-        return await monitor_job(task_id, pod_name, namespace, db, max_retries)
+        return await monitor_job(task_id, pod_name, namespace)
 
     except Exception as e:
         print(f"Failed to submit Job for {task_id}: {e}")
-        db.insert_or_update_result(
-            task_id, status="failed", end_time=time.time()
-        )
         return task_id, "failed"
 
 
 async def verify_batch_parallel(
     task_ids: List[str],
     namespace: str,
-    db: AgentPatchVerificationDB,
     patch_url_template: str,
     agent_image: str,
     pvc_name: str,
@@ -655,7 +478,6 @@ async def verify_batch_parallel(
     dev_memory_request: int,
     dev_cpu_request: int,
     max_parallel: int,
-    max_retries: int,
 ):
     """Verify multiple tasks in parallel using agents."""
     print(
@@ -675,14 +497,12 @@ async def verify_batch_parallel(
                 submit_and_monitor_task(
                     task_id=task_id,
                     namespace=namespace,
-                    db=db,
                     patch_url=patch_url,
                     agent_image=agent_image,
                     pvc_name=pvc_name,
                     command_port=command_port,
                     dev_memory_request=dev_memory_request,
                     dev_cpu_request=dev_cpu_request,
-                    max_retries=max_retries,
                 )
             )
             running_tasks[task_id] = task
@@ -707,29 +527,7 @@ async def verify_batch_parallel(
     print(f"Agent verification completed: {completed_count} tasks processed")
 
 
-def filter_tasks(task_ids: List[str], db: AgentPatchVerificationDB, max_retries: int) -> List[str]:
-    """Filter task list to remove already-successful and over-retry-limit tasks."""
-    successful_tasks = set(db.get_successful_tasks())
-    over_limit_tasks = set(db.get_tasks_exceeding_retry_limit(max_retries))
-    
-    filtered = []
-    skipped_success = 0
-    skipped_retry_limit = 0
-    
-    for task_id in task_ids:
-        if task_id in successful_tasks:
-            skipped_success += 1
-        elif task_id in over_limit_tasks:
-            skipped_retry_limit += 1
-        else:
-            filtered.append(task_id)
-    
-    if skipped_success > 0:
-        print(f"Filtered out {skipped_success} already-successful tasks")
-    if skipped_retry_limit > 0:
-        print(f"Filtered out {skipped_retry_limit} tasks exceeding retry limit")
-    
-    return filtered
+
 
 
 def main():
@@ -769,15 +567,7 @@ def main():
         "--max-parallel", type=int, default=2, help="Maximum parallel pods (default 2 for agent)"
     )
     parser.add_argument(
-        "--max-retries", type=int, default=2, help="Maximum retries per task"
-    )
-    parser.add_argument(
         "--sample", type=int, help="Randomly sample N tasks from the task list"
-    )
-    parser.add_argument(
-        "--skip-filter",
-        action="store_true",
-        help="Skip upfront task filtering (check status individually instead)",
     )
 
     args = parser.parse_args()
@@ -785,8 +575,6 @@ def main():
     # Set global namespace for cleanup
     global _cleanup_namespace
     _cleanup_namespace = args.namespace
-
-    db = AgentPatchVerificationDB()
 
     # Extract sidecar configuration from args
     sidecar_config = {
@@ -804,18 +592,12 @@ def main():
             verify_single_task(
                 args.task_id,
                 args.namespace,
-                db,
                 patch_url=patch_url,
                 **sidecar_config,
-                max_retries=args.max_retries,
             )
         else:
             task_ids = load_task_list(args.task_list)
             print(f"Loaded {len(task_ids)} tasks for agent verification")
-
-            if not args.skip_filter:
-                task_ids = filter_tasks(task_ids, db, args.max_retries)
-                print(f"After filtering: {len(task_ids)} tasks to process")
 
             if args.sample and args.sample < len(task_ids):
                 task_ids = random.sample(task_ids, args.sample)
@@ -829,10 +611,8 @@ def main():
                     verify_single_task(
                         task_id,
                         args.namespace,
-                        db,
                         patch_url=patch_url,
                         **sidecar_config,
-                        max_retries=args.max_retries,
                     )
                     completed_count += 1
                     print(f"Progress: {completed_count}/{len(task_ids)} tasks processed")
@@ -841,11 +621,9 @@ def main():
                     verify_batch_parallel(
                         task_ids,
                         args.namespace,
-                        db,
                         patch_url_template=args.patch_url_template,
                         **sidecar_config,
                         max_parallel=args.max_parallel,
-                        max_retries=args.max_retries,
                     )
                 )
     finally:

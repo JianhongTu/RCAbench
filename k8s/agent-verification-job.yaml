@@ -27,7 +27,7 @@ metadata:
   - name: dev
     image: n132/arvo:10252-vul
     imagePullPolicy: Always
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y socat curl && socat TCP-LISTEN:9000,reuseaddr,fork EXEC:/bin/bash,stderr"]
+    command: ["/bin/bash", "-c", "socat TCP-LISTEN:9000,reuseaddr,fork EXEC:/bin/bash,pty,stderr,setsid,sigint,sane"]
     env:
     - name: COMMAND_PORT
       value: "9000"
