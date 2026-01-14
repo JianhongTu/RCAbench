@@ -32,15 +32,44 @@ This will start:
 
 ### Option B: Using scenario.toml (Recommended for Development)
 
-Start both agents from configuration:
-
+**Quick Start (All-in-one):**
 ```bash
 cd agents/mini-swe-agent
 source path.sh
-python start_agents.py
+./run.sh [arvo_id|--all]
+./run.sh 14368  # Run specific task
+./run.sh  # Uses all task_ids from scenario.toml
+./run.sh --all  # Explicitly run all tasks from scenario.toml
 ```
 
-This reads `scenario.toml` and starts both agents automatically.
+This will:
+1. Start both agents with the ARVO task ID (from command line or scenario.toml)
+2. Wait for agents to start
+3. Send the task(s) automatically (all tasks from scenario.toml if no ID specified)
+4. Keep agents running (press Ctrl+C to stop)
+
+**Manual Start (Two Steps):**
+
+Start both agents from configuration:
+```bash
+cd agents/mini-swe-agent
+source path.sh
+python start_agents.py [--arvo-id <arvo_id>]
+python start_agents.py  # Uses first task_id from scenario.toml
+python start_agents.py --arvo-id 14368  # Override with specific ID
+```
+
+Then in another terminal, send the task:
+```bash
+cd agents/mini-swe-agent
+source path.sh
+python send_task.py [arvo_id|--all]
+python send_task.py  # Uses all task_ids from scenario.toml
+python send_task.py 14368  # Override with specific ID
+python send_task.py --all  # Explicitly use all task_ids from scenario.toml
+```
+
+**Note:** If no ARVO ID is provided, both scripts will use **all** `task_ids` from `scenario.toml`'s `config.task_ids` array. Use `--all` to explicitly run all tasks, or provide a specific ID to run just one.
 
 ### Option C: Running Manually (Alternative)
 
@@ -72,20 +101,30 @@ curl http://localhost:9019/.well-known/agent-card.json
 
 ## Step 4: Send a Task
 
-Use the test script to send a task (just provide arvo_id):
+**Quick Start:** Use the all-in-one script (see Step 2, Option B) which handles everything automatically.
+
+**Manual:** If you started agents manually, use the send script:
 
 ```bash
 cd agents/mini-swe-agent
 source path.sh
-python test_send_task_to_green.py <arvo_id>
-python test_send_task_to_green.py 10055
+python send_task.py [arvo_id]
+python send_task.py  # Uses first task_id from scenario.toml
+python send_task.py 14368  # Override with specific ID
 ```
 
-**Note:** The script sends a minimal message (`Task ID: arvo:10055`). The Green Agent will:
+**Note:** The ARVO ID can be provided via command line or will be read from `scenario.toml`'s `config.task_ids` array.
+
+**Note:** The script sends a minimal message (`Task ID: arvo:14368`). The Green Agent will:
 - Extract the arvo_id
 - Call `prepare_task_assets()` to fetch real codebase and error report
 - Create the full task description
 - Send it to the Purple Agent
+
+**Log File Location:** 
+- Log directory: `./logs/log_{timestamp}/` (timestamped, shared by all tasks in the run)
+- General logs: `./logs/log_{timestamp}/agents.log` (shared by both agents)
+- Per-ARVO logs: `./logs/log_{timestamp}/arvo_{arvo_id}.log` (one file per ARVO ID, contains logs from both green and purple agents)
 
 ### Option A: Using RCAJudge (Full Evaluation Flow)
 

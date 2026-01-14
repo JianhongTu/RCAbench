@@ -38,9 +38,11 @@ workspace/
 results/
 tmp/
 logs/
+agents/mini-swe-agent/logs/
 cache/
 data/
 
 *.egg-info/
+
 
 __pycache__/

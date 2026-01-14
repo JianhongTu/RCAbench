@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -31,8 +32,53 @@ from a2a.types import (
 )
 from a2a.utils import new_agent_text_message
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to both console and shared file
+# Use shared utility to get run log directory
+from utility import get_or_create_run_log_dir
+
+scenario_file = Path(__file__).parent / "scenario.toml"
+run_log_dir = get_or_create_run_log_dir(scenario_file=scenario_file)
+shared_log_file = run_log_dir / "agents.log"  # Shared log file for both agents
+
+# Create formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Console handler (INFO level)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+# Shared file handler (INFO level - same as console)
+# Simple FileHandler (no rotation) - thread-safe for async writes
+# Ensure the log file is created immediately by touching it
+shared_log_file.parent.mkdir(parents=True, exist_ok=True)
+try:
+    shared_log_file.touch(exist_ok=True)
+    # Verify file was created
+    if not shared_log_file.exists():
+        raise FileNotFoundError(f"Failed to create log file: {shared_log_file}")
+except Exception as e:
+    print(f"ERROR: Could not create log file {shared_log_file}: {e}", file=sys.stderr)
+    raise
+
+file_handler = logging.FileHandler(shared_log_file, encoding='utf-8', mode='a')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+
+# Configure root logger explicitly (force configuration even if already configured)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# Clear any existing handlers to avoid duplicates
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger("purple_agent")
+logger.setLevel(logging.INFO)  # Ensure our logger level is set
+logger.info(f"Logging to shared file: {shared_log_file}")
 
 # Import mini-swe-agent components
 try:
@@ -92,6 +138,18 @@ class PurpleAgentExecutor:
     def cleanup_all_tasks(self):
         """Clean up all active task contexts. Called on server shutdown."""
         logger.info(f"[PURPLE] Cleaning up {len(self.task_contexts)} active task context(s)...")
+        # Clean up per-ARVO log handlers
+        for context_id, task_ctx in list(self.task_contexts.items()):
+            if "arvo_log_handler" in task_ctx:
+                handler = task_ctx["arvo_log_handler"]
+                logger.removeHandler(handler)
+                handler.close()
+                del task_ctx["arvo_log_handler"]
+        # Restore propagation after all handlers are removed (only if no handlers remain)
+        # Check if there are any file handlers left (excluding console handler)
+        file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+        if not file_handlers:
+            logger.propagate = True
         # Task contexts are just in-memory, so we just clear them
         # If DefaultAgent instances need cleanup, it would go here
         self.task_contexts.clear()
@@ -105,13 +163,8 @@ class PurpleAgentExecutor:
         user_input = context.get_user_input()
         context_id = context.context_id
         
-        logger.info(f"[PURPLE] ===== Execute called (context_id={context_id}) =====")
-        logger.info(f"[PURPLE] Message preview: {user_input[:200]}...")
-        logger.debug(f"[PURPLE] Full message length: {len(user_input)}")
-        
         # Initialize task context if not exists
         if context_id not in self.task_contexts:
-            logger.info(f"[PURPLE] Creating new task context for {context_id}")
             
             # Create DefaultAgent with A2AEnvironment if available
             agent = None
@@ -150,43 +203,57 @@ class PurpleAgentExecutor:
             }
         
         task_ctx = self.task_contexts[context_id]
-        logger.info(f"[PURPLE] Task context: initialized={task_ctx['task_initialized']}, step_count={task_ctx['step_count']}")
         
         # Check if this is task initialization (contains "Task ID: arvo:" or "arvo:")
         # Also check if task is not yet initialized
         if not task_ctx["task_initialized"] and ("Task ID: arvo:" in user_input or "arvo:" in user_input):
-            logger.info("[PURPLE] Detected task initialization message - calling _handle_task_init")
             response = await self._handle_task_init(user_input, context_id, task_ctx, event_queue)
-            logger.info(f"[PURPLE] _handle_task_init returned: {response[:100]}...")
         elif task_ctx["task_initialized"]:
             # Task is initialized, this is a response from green agent
-            logger.info("[PURPLE] Task already initialized - treating as green agent response")
-            logger.info(f"[PURPLE] Calling _handle_green_response (step {task_ctx['step_count']})")
             response = await self._handle_green_response(user_input, context_id, task_ctx, event_queue)
-            logger.info(f"[PURPLE] _handle_green_response returned: {response[:100]}...")
         else:
             # First message but doesn't match expected format
-            logger.warning(f"[PURPLE] Received message but doesn't match expected format. First 200 chars: {user_input[:200]}")
+            logger.warning(f"[PURPLE] Invalid task format. Expected 'Task ID: arvo:XXXXX'")
             response = "Error: Invalid task format. Expected task description with 'Task ID: arvo:XXXXX' or 'arvo:XXXXX'"
         
-        logger.info(f"[PURPLE] Attempting to enqueue response (length={len(response)})")
         try:
             await event_queue.enqueue_event(
                 new_agent_text_message(response, context_id=context_id)
             )
-            logger.info("[PURPLE] Successfully enqueued response to event queue")
         except Exception as e:
-            # Event queue might be closed if this is a long-running operation
-            # Log the warning but don't fail - the response will be sent via HTTP response
-            logger.warning(f"[PURPLE] Could not enqueue event (queue may be closed): {e}")
-            logger.info("[PURPLE] Response will still be returned via HTTP response")
-        
-        logger.info(f"[PURPLE] ===== Execute completed (context_id={context_id}) =====")
+            logger.warning(f"[PURPLE] Could not enqueue event: {e}")
     
     async def _handle_task_init(
         self, message: str, context_id: str, task_ctx: Dict, event_queue
     ) -> str:
         """Handle task initialization."""
+        # Extract arvo_id from message to create per-ARVO log file
+        arvo_id_match = re.search(r"arvo:(\d+)", message)
+        if arvo_id_match:
+            arvo_id = arvo_id_match.group(1)
+            
+            # Create per-ARVO log file handler
+            arvo_log_file = run_log_dir / f"arvo_{arvo_id}.log"
+            arvo_log_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create file handler for this ARVO
+            arvo_handler = logging.FileHandler(arvo_log_file, encoding='utf-8', mode='a')
+            arvo_handler.setLevel(logging.INFO)
+            # Include context_id in log format for traceability
+            arvo_formatter = logging.Formatter(
+                f'%(asctime)s - [{context_id[:8]}] - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            arvo_handler.setFormatter(arvo_formatter)
+            
+            # Add handler to logger
+            # Disable propagation to prevent task logs from going to agents.log
+            logger.propagate = False
+            logger.addHandler(arvo_handler)
+            task_ctx["arvo_log_handler"] = arvo_handler
+            
+            logger.info(f"[PURPLE] Created per-ARVO log file: {arvo_log_file}")
+        
         # The message is already the full task description from green agent
         # Use it directly as the initial user message - no system prompt needed
         # Green agent's message contains all instructions, requirements, and task details
@@ -200,27 +267,23 @@ class PurpleAgentExecutor:
         # We don't need to send anything back to green agent - just acknowledge receipt
         task_ctx["task_initialized"] = True
         
-        logger.info("[PURPLE] Task received from green agent. Task initialized. Starting command decision loop...")
+        logger.info("[PURPLE] Task initialized. Starting command loop...")
         
         # Start the command decision loop immediately
         # The green agent has already prepared assets and initialized ARVO container
         # We call _decide_next_command which will send the first command to green agent
         # The green agent's response will come as a NEW request, which will route to _handle_green_response
-        logger.info("[PURPLE] Calling _decide_next_command to send first command...")
         try:
             response = await self._decide_next_command(context_id, task_ctx, event_queue)
-            logger.info(f"[PURPLE] _decide_next_command returned (this is the green agent's response): {response[:100]}...")
-            logger.info(f"[PURPLE] Full response length: {len(response)}")
             
             # IMPORTANT: The response from _decide_next_command is the green agent's command execution result
             # This should be treated as if it came from _handle_green_response, so we process it
             # and decide the next command. But we're still in _handle_task_init, so we need to
             # process this response and continue the loop.
-            logger.info("[PURPLE] Processing green agent's response and continuing command loop...")
-            logger.info(f"[PURPLE] About to call _handle_green_response with response of length {len(response)}")
-            result = await self._handle_green_response(response, context_id, task_ctx, event_queue)
-            logger.info(f"[PURPLE] _handle_green_response returned from within _handle_task_init: {result[:100] if result else 'None'}...")
-            return result
+            if response and not response.startswith("[TASK FINISHED]"):
+                result = await self._handle_green_response(response, context_id, task_ctx, event_queue)
+                return result
+            return response
         except Exception as e:
             logger.error(f"[PURPLE] Exception in _handle_task_init after _decide_next_command: {e}", exc_info=True)
             raise
@@ -229,38 +292,27 @@ class PurpleAgentExecutor:
         self, message: str, context_id: str, task_ctx: Dict, event_queue
     ) -> str:
         """Handle response from green agent (command execution result)."""
-        logger.info(f"[PURPLE] ===== _handle_green_response ENTRY =====")
-        logger.info(f"[PURPLE] _handle_green_response called (context_id={context_id}, step={task_ctx['step_count']})")
-        logger.info(f"[PURPLE] ===== Green Agent Response (length={len(message)}) =====\n{message}\n[PURPLE] ===== End of Green Agent Response =====")
-        
         try:
             # Add green agent response to context
-            logger.info(f"[PURPLE] Adding response to message history (current count: {len(task_ctx['messages'])})")
             task_ctx["messages"].append({
                 "role": "user",
                 "content": f"Command result:\n{message}",
                 "timestamp": time.time()
             })
-            logger.info(f"[PURPLE] Added response to message history (total messages: {len(task_ctx['messages'])})")
             
             # Check if task is completed
             if "[TASK COMPLETED]" in message:
-                logger.info("[PURPLE] Task completed by green agent - returning [TASK FINISHED]")
+                logger.info("[PURPLE] Task completed by green agent")
                 return "[TASK FINISHED]"
             
             # Check exit conditions
-            logger.info("[PURPLE] Checking exit conditions...")
             should_exit, exit_reason = self._check_exit_conditions(task_ctx)
             if should_exit:
-                logger.info(f"[PURPLE] Exit condition met: {exit_reason} - returning [TASK FINISHED]")
+                logger.info(f"[PURPLE] Exit condition: {exit_reason}")
                 return f"[TASK FINISHED] Exit reason: {exit_reason}"
             
             # Decide next command
-            logger.info("[PURPLE] No exit conditions met - calling _decide_next_command to continue loop")
-            logger.info(f"[PURPLE] About to call _decide_next_command (step_count={task_ctx['step_count']}, max_steps={self.max_steps})")
             result = await self._decide_next_command(context_id, task_ctx, event_queue)
-            logger.info(f"[PURPLE] _decide_next_command returned from _handle_green_response: {result[:200] if result else 'None'}...")
-            logger.info(f"[PURPLE] ===== _handle_green_response EXIT (returning result) =====")
             return result
         except Exception as e:
             logger.error(f"[PURPLE] Exception in _handle_green_response: {e}", exc_info=True)
@@ -270,18 +322,14 @@ class PurpleAgentExecutor:
         self, context_id: str, task_ctx: Dict, event_queue
     ) -> str:
         """Use LLM to decide next command. Uses DefaultAgent if available, otherwise falls back to manual LLM calls."""
-        logger.info(f"[PURPLE] ===== _decide_next_command called =====")
-        logger.info(f"[PURPLE] Current step_count before increment: {task_ctx['step_count']}")
         task_ctx["step_count"] += 1
-        logger.info(f"[PURPLE] Step count after increment: {task_ctx['step_count']}")
         
         if task_ctx["step_count"] > self.max_steps:
-            logger.warning(f"[PURPLE] Max steps reached: {task_ctx['step_count']} > {self.max_steps}")
+            logger.warning(f"[PURPLE] Max steps reached: {task_ctx['step_count']}")
             return "[TASK FINISHED] Max steps reached"
         
-        logger.info(f"[PURPLE] Step {task_ctx['step_count']}/{self.max_steps} - Deciding next command...")
-        logger.info(f"[PURPLE] Total tokens so far: {task_ctx['total_tokens']}/{self.max_tokens} ({task_ctx['total_tokens']/self.max_tokens*100:.1f}%)")
-        logger.info(f"[PURPLE] Number of messages in context: {len(task_ctx['messages'])}")
+        # Log step progress
+        logger.info(f"[PURPLE] Step {task_ctx['step_count']}/{self.max_steps}")
         
         # Check token usage and summarize if needed (before making LLM call)
         token_usage_ratio = task_ctx["total_tokens"] / self.max_tokens
@@ -290,11 +338,14 @@ class PurpleAgentExecutor:
         # Prevent repeated summarization attempts
         last_summarized = task_ctx.get("last_summarized_at_ratio", 0.0)
         if token_usage_ratio >= 0.8 and (token_usage_ratio - last_summarized) >= 0.1:
-            logger.info(f"[PURPLE] Token usage at {token_usage_ratio*100:.1f}% - attempting summarization")
+            logger.info(f"[PURPLE] Token usage at {token_usage_ratio*100:.1f}% ({task_ctx['total_tokens']}/{self.max_tokens} tokens) - summarizing context")
+            tokens_before = task_ctx["total_tokens"]
             summarized = await self._summarize_old_messages(task_ctx, context_id, threshold=0.8)
             if summarized:
+                tokens_after = task_ctx["total_tokens"]
+                tokens_saved = tokens_before - tokens_after
                 task_ctx["last_summarized_at_ratio"] = token_usage_ratio
-                logger.info(f"[PURPLE] After summarization: {task_ctx['total_tokens']}/{self.max_tokens} ({task_ctx['total_tokens']/self.max_tokens*100:.1f}%)")
+                logger.info(f"[PURPLE] After summarization: {tokens_after}/{self.max_tokens} ({tokens_after/self.max_tokens*100:.1f}%) - saved {tokens_saved} tokens")
             
             # Check again after summarization
             token_usage_ratio = task_ctx["total_tokens"] / self.max_tokens
@@ -307,11 +358,9 @@ class PurpleAgentExecutor:
             
             if agent and MINI_SWE_AGENT_AVAILABLE:
                 # Use DefaultAgent from mini-swe-agent
-                logger.info("[PURPLE] Using DefaultAgent for LLM interaction")
                 return await self._decide_with_default_agent(context_id, task_ctx, event_queue, agent)
             else:
                 # Fallback to manual LLM calls (original implementation)
-                logger.info("[PURPLE] Using manual LLM calls (fallback)")
                 return await self._decide_with_manual_llm(context_id, task_ctx, event_queue)
         
         except Exception as e:
@@ -340,9 +389,7 @@ class PurpleAgentExecutor:
                 command_history_msg = self._format_command_history(command_history)
                 if command_history_msg:
                     model_messages.append({k: v for k, v in command_history_msg.items() if k != "timestamp"})
-                    logger.info(f"[PURPLE] Added command history to context ({len(command_history)} commands)")
         
-        logger.info(f"[PURPLE] Calling DefaultAgent's model with {len(model_messages)} messages")
         
         # Use DefaultAgent's model to get response
         # The model handles parameter fallbacks automatically
@@ -373,11 +420,8 @@ class PurpleAgentExecutor:
         if not llm_response or len(llm_response.strip()) == 0:
             logger.warning(f"[PURPLE] DefaultAgent model returned empty response!")
         
-        logger.info(f"[PURPLE] Model response received (length={len(llm_response) if llm_response else 0})")
-        if llm_response:
-            logger.info(f"[PURPLE] ===== LLM Reasoning/Thought Process =====\n{llm_response}\n[PURPLE] ===== End of LLM Response =====")
-        else:
-            logger.error(f"[PURPLE] ===== LLM Response is EMPTY! =====\n[PURPLE] ===== End of LLM Response =====")
+        if not llm_response or len(llm_response.strip()) == 0:
+            logger.error(f"[PURPLE] LLM returned empty response!")
         
         # Add LLM response to context
         task_ctx["messages"].append({
@@ -391,12 +435,11 @@ class PurpleAgentExecutor:
         
         # Extract command from LLM response
         command = self._extract_command(llm_response)
-        logger.info(f"[PURPLE] Extracted command: {command[:200] if command else 'None'}...")
         
         if command:
             # Send command to green agent
             command_request = f"execute: {command}"
-            logger.info(f"[PURPLE] Sending command to green agent: {command[:100]}...")
+            logger.info(f"[PURPLE] Command to run: {command}")
             
             # Store command in command history (before execution)
             task_ctx["command_history"].append({
@@ -407,7 +450,6 @@ class PurpleAgentExecutor:
             
             try:
                 green_response = await self._send_to_green_agent(command_request, context_id)
-                logger.info(f"[PURPLE] Green agent response received (length={len(green_response)})")
                 
                 # Update command history with result
                 if task_ctx["command_history"]:
@@ -415,7 +457,7 @@ class PurpleAgentExecutor:
                 
                 # If task is finished, verify submission file was created and then finish
                 if task_finished:
-                    logger.info("[PURPLE] LLM indicated task finished after executing command")
+                    logger.info("[PURPLE] Task finished signal received")
                     # Check if this was a submission file creation command
                     if "loc.json" in command.lower():
                         # Verify the file was created successfully
@@ -425,7 +467,7 @@ class PurpleAgentExecutor:
                             # Continue to let agent retry or investigate
                             return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
                         else:
-                            logger.info("[PURPLE] Submission file verified successfully")
+                            logger.info("[PURPLE] Submission file verified")
                     return "[TASK FINISHED]"
                 
                 # Continue the loop
@@ -434,7 +476,7 @@ class PurpleAgentExecutor:
                 logger.error(f"[PURPLE] Error sending command to green agent: {e}", exc_info=True)
                 return f"Error sending command to green agent: {str(e)}"
         elif task_finished:
-            logger.info("[PURPLE] LLM indicated task finished (no command to execute)")
+            logger.info("[PURPLE] Task finished (no command)")
             return "[TASK FINISHED]"
         else:
             logger.warning("[PURPLE] No command extracted from LLM response")
@@ -458,7 +500,6 @@ class PurpleAgentExecutor:
                 client_kwargs["base_url"] = self.base_url
             self._openai_client = OpenAI(**client_kwargs)
         
-        logger.info(f"[PURPLE] Calling LLM with {len(task_ctx['messages'])} messages")
         
         messages = [
             {k: v for k, v in msg.items() if k != "timestamp"}
@@ -474,7 +515,6 @@ class PurpleAgentExecutor:
                 command_history_msg = self._format_command_history(command_history)
                 if command_history_msg:
                     messages.append({k: v for k, v in command_history_msg.items() if k != "timestamp"})
-                    logger.info(f"[PURPLE] Added command history to context ({len(command_history)} commands)")
         
         # Try with max_completion_tokens first, fallback based on errors
         # Increased to 4096 to handle longer responses when context is large
@@ -488,7 +528,6 @@ class PurpleAgentExecutor:
         except Exception as e:
             error_str = str(e)
             if "max_completion_tokens" in error_str:
-                logger.info(f"[PURPLE] Using max_tokens instead of max_completion_tokens")
                 try:
                     response = self._openai_client.chat.completions.create(
                         model=self.model,
@@ -497,7 +536,6 @@ class PurpleAgentExecutor:
                     )
                 except Exception as e2:
                     if "temperature" in str(e2):
-                        logger.info(f"[PURPLE] Removing temperature parameter")
                         response = self._openai_client.chat.completions.create(
                             model=self.model,
                             messages=messages,
@@ -506,7 +544,6 @@ class PurpleAgentExecutor:
                     else:
                         raise
             elif "temperature" in error_str:
-                logger.info(f"[PURPLE] Removing temperature parameter")
                 response = self._openai_client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -546,11 +583,13 @@ class PurpleAgentExecutor:
         completion_tokens = response.usage.completion_tokens
         task_ctx["total_tokens"] += prompt_tokens + completion_tokens
         
-        logger.info(f"[PURPLE] LLM response received (prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, length={len(llm_response) if llm_response else 0})")
-        if llm_response:
-            logger.info(f"[PURPLE] ===== LLM Reasoning/Thought Process =====\n{llm_response}\n[PURPLE] ===== End of LLM Response =====")
-        else:
-            logger.error(f"[PURPLE] ===== LLM Response is EMPTY! =====\nFinish reason: {getattr(choice, 'finish_reason', 'unknown')}\n[PURPLE] ===== End of LLM Response =====")
+        # Log token usage
+        total_tokens = task_ctx["total_tokens"]
+        token_usage_pct = (total_tokens / self.max_tokens) * 100
+        logger.info(f"[PURPLE] Token usage: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}/{self.max_tokens} ({token_usage_pct:.1f}%)")
+        
+        if not llm_response or len(llm_response.strip()) == 0:
+            logger.error(f"[PURPLE] LLM returned empty response (finish_reason={getattr(choice, 'finish_reason', 'unknown')})")
         
         # Add LLM response to context
         task_ctx["messages"].append({
@@ -574,11 +613,9 @@ class PurpleAgentExecutor:
             return "Error: LLM returned empty response. Please try again."
         
         command = self._extract_command(llm_response)
-        logger.info(f"[PURPLE] Extracted command: {command[:200] if command else 'None'}...")
-        
         if command:
             command_request = f"execute: {command}"
-            logger.info(f"[PURPLE] Sending command to green agent: {command[:100]}...")
+            logger.info(f"[PURPLE] Command to run: {command}")
             
             # Store command in command history (before execution)
             task_ctx["command_history"].append({
@@ -589,7 +626,6 @@ class PurpleAgentExecutor:
             
             try:
                 green_response = await self._send_to_green_agent(command_request, context_id)
-                logger.info(f"[PURPLE] Green agent response received (length={len(green_response)})")
                 
                 # Update command history with result
                 if task_ctx["command_history"]:
@@ -597,7 +633,7 @@ class PurpleAgentExecutor:
                 
                 # If task is finished, verify submission file was created and then finish
                 if task_finished:
-                    logger.info("[PURPLE] LLM indicated task finished after executing command")
+                    logger.info("[PURPLE] Task finished signal received")
                     # Check if this was a submission file creation command
                     if "loc.json" in command.lower():
                         # Verify the file was created successfully
@@ -607,7 +643,7 @@ class PurpleAgentExecutor:
                             # Continue to let agent retry or investigate
                             return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
                         else:
-                            logger.info("[PURPLE] Submission file verified successfully")
+                            logger.info("[PURPLE] Submission file verified")
                     return "[TASK FINISHED]"
                 
                 return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
@@ -615,7 +651,7 @@ class PurpleAgentExecutor:
                 logger.error(f"[PURPLE] Error sending command to green agent: {e}", exc_info=True)
                 return f"Error sending command to green agent: {str(e)}"
         elif task_finished:
-            logger.info("[PURPLE] LLM indicated task finished (no command to execute)")
+            logger.info("[PURPLE] Task finished (no command)")
             return "[TASK FINISHED]"
         else:
             logger.warning("[PURPLE] No command extracted from LLM response")
@@ -978,7 +1014,6 @@ Provide a concise summary that will help the agent continue the analysis with th
                     "timestamp": time.time()
                 })
                 command_summary_tokens = len(command_summary) // 4
-                logger.info(f"[PURPLE] Added command execution summary (~{command_summary_tokens} tokens)")
             
             # Add recent messages
             new_messages.extend(recent_messages)
@@ -992,7 +1027,6 @@ Provide a concise summary that will help the agent continue the analysis with th
                 if recent_commands_msg:
                     new_messages.append(recent_commands_msg)
                     command_history_tokens = len(str(recent_commands_msg.get("content", ""))) // 4
-                    logger.info(f"[PURPLE] Added recent command history to context ({len(recent_command_history)} commands, ~{command_history_tokens} tokens)")
             
             # Update task context
             task_ctx["messages"] = new_messages
@@ -1073,7 +1107,6 @@ Provide a concise summary that will help the agent continue the analysis with th
                 context_id=context_id,
             )
             response = outputs.get("response", "")
-            logger.info(f"[PURPLE] Received response from green agent (length={len(response)})")
             return response
         except Exception as e:
             logger.error(f"[PURPLE] Error sending to green agent: {e}", exc_info=True)

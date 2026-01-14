@@ -8,7 +8,11 @@ endpoint = "http://127.0.0.1:9019"
 cmd = "python purple_agent_server.py --port 9019 --green-agent-url http://127.0.0.1:9009/"
 
 [config]
+# Base directory for logs (relative to scenario.toml location)
+log_dir = "./logs"
 # List of ARVO task IDs to test
-task_ids = [14368]
+#task_ids = [14368]
 # Or load from file (uncomment to use):
-# task_ids_file = "data/good_arvo_task_ids.json"
+# Path is relative to scenario.toml location (agents/mini-swe-agent/)
+# File is at project root: ../../data/arvo_hf_task_ids.txt
+task_ids_file = "../../data/arvo_hf_task_ids.txt"

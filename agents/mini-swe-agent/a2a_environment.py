@@ -41,7 +41,6 @@ class A2AEnvironment:
         """
         self.green_agent_url = green_agent_url
         self.context_id = context_id
-        logger.info(f"A2AEnvironment initialized (green_agent_url={green_agent_url}, context_id={context_id})")
     
     def execute(self, command: str, cwd: Optional[str] = None) -> CommandResult:
         """
@@ -56,8 +55,6 @@ class A2AEnvironment:
         """
         # Format command for green agent
         command_request = f"execute: {command}"
-        
-        logger.info(f"[A2A_ENV] Sending command to green agent: {command[:100]}...")
         
         try:
             # Send to green agent via A2A (synchronous call)
@@ -93,8 +90,6 @@ class A2AEnvironment:
                 else:
                     # If no <output> tag, take everything after </returncode>
                     output = response.split("</returncode>", 1)[-1].strip()
-            
-            logger.info(f"[A2A_ENV] Command executed (returncode={returncode}, output_length={len(output)})")
             
             return CommandResult(
                 returncode=returncode,

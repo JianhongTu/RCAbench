@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any
@@ -53,8 +54,53 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
     from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to both console and shared file
+# Use shared utility to get run log directory
+from utility import get_or_create_run_log_dir
+
+scenario_file = Path(__file__).parent / "scenario.toml"
+run_log_dir = get_or_create_run_log_dir(scenario_file=scenario_file)
+shared_log_file = run_log_dir / "agents.log"  # Shared log file for both agents
+
+# Create formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Console handler (INFO level)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+# Shared file handler (INFO level - same as console)
+# Simple FileHandler (no rotation) - thread-safe for async writes
+# Ensure the log file is created immediately by touching it
+shared_log_file.parent.mkdir(parents=True, exist_ok=True)
+try:
+    shared_log_file.touch(exist_ok=True)
+    # Verify file was created
+    if not shared_log_file.exists():
+        raise FileNotFoundError(f"Failed to create log file: {shared_log_file}")
+except Exception as e:
+    print(f"ERROR: Could not create log file {shared_log_file}: {e}", file=sys.stderr)
+    raise
+
+file_handler = logging.FileHandler(shared_log_file, encoding='utf-8', mode='a')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+
+# Configure root logger explicitly (force configuration even if already configured)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+# Clear any existing handlers to avoid duplicates
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger("green_agent")
+logger.setLevel(logging.DEBUG)  # Ensure our logger level is set
+logger.info(f"Logging to shared file: {shared_log_file}")
 
 
 class TaskContext:
@@ -70,6 +116,7 @@ class TaskContext:
         self.command_count = 0
         self.failed_commands = 0
         self.context_id: Optional[str] = None  # A2A context ID for this task
+        self.arvo_log_handler: Optional[logging.FileHandler] = None  # Per-ARVO log handler
 
 
 class GreenAgentExecutor:
@@ -115,21 +162,14 @@ class GreenAgentExecutor:
         user_input = context.get_user_input()
         context_id = context.context_id
         
-        logger.info(f"[GREEN] ===== Execute called (context_id={context_id}) =====")
-        logger.info(f"[GREEN] Message preview: {user_input[:100]}...")
-        
         # Simple state-based routing - check if task context exists
         task_context = self.task_contexts.get(context_id)
-        logger.info(f"[GREEN] Task context exists: {task_context is not None}")
         
         if task_context is not None:
             # Task already initialized - handle commands or completion
-            logger.info(f"[GREEN] Task already initialized (arvo_id={task_context.arvo_id})")
             if user_input.strip().startswith("execute:"):
-                logger.info("[GREEN] Detected command execution request")
                 response = await self._handle_command_execution(user_input, context_id, event_queue)
             elif "[TASK FINISHED]" in user_input.upper():
-                logger.info("[GREEN] Detected task finished signal")
                 response = await self._handle_task_finished(context_id, event_queue)
             else:
                 # Task exists but message is not a command - acknowledge
@@ -138,26 +178,19 @@ class GreenAgentExecutor:
         else:
             # No task context exists - this must be a new task from RCAJudge
             # Check if it looks like a task (contains "Task ID:" or "arvo:")
-            logger.info("[GREEN] No task context exists - checking if this is a new task")
             if "Task ID:" in user_input or "arvo:" in user_input:
-                logger.info("[GREEN] Detected new task from RCAJudge")
                 response = await self._handle_task_from_judge(user_input, context_id, event_queue)
             else:
                 # Unknown message - acknowledge
                 logger.warning("[GREEN] Unknown message format")
                 response = "Green agent received your message. Please send a task with arvo_id (format: 'Task ID: arvo:XXXXX' or 'arvo:XXXXX') or a command in 'execute: <command>' format."
         
-        logger.info(f"[GREEN] Response generated (length={len(response)})")
-        logger.info(f"[GREEN] Attempting to enqueue response")
         try:
             await event_queue.enqueue_event(
                 new_agent_text_message(response, context_id=context_id)
             )
-            logger.info("[GREEN] Successfully enqueued response")
         except Exception as e:
             logger.warning(f"[GREEN] Could not enqueue event: {e}")
-        
-        logger.info(f"[GREEN] ===== Execute completed (context_id={context_id}) =====")
     
     async def _handle_task_init(
         self, message: str, context_id: str, event_queue
@@ -169,7 +202,6 @@ class GreenAgentExecutor:
             return "Error: Could not find arvo_id in task description. Expected format: 'arvo:XXXXX'"
         
         arvo_id = arvo_id_match.group(1)
-        logger.info(f"Initializing task {arvo_id} for context {context_id}")
         
         try:
             # Prepare task assets
@@ -238,8 +270,7 @@ class GreenAgentExecutor:
             return "Error: Could not find arvo_id in message. Expected format: 'Task ID: arvo:XXXXX' or 'arvo:XXXXX'"
         
         arvo_id = arvo_id_match.group(1)
-        logger.info(f"Received task {arvo_id} (context_id={context_id})")
-        logger.info(f"Message format: {'minimal' if len(message.strip()) < 200 else 'full'}")
+        logger.info(f"[GREEN] Received task {arvo_id}")
         
         try:
             # Prepare task assets
@@ -270,10 +301,6 @@ class GreenAgentExecutor:
             task_context.context_id = context_id
             
             # Initialize ARVO container
-            await event_queue.enqueue_event(
-                new_agent_text_message(f"Initializing ARVO container for task {arvo_id}...", context_id=context_id)
-            )
-            
             task_context.docker_env = ArvoDockerEnvironment(
                 arvo_id=arvo_id,
                 workspace_dir=workspace_dir,
@@ -281,6 +308,28 @@ class GreenAgentExecutor:
             
             # Store context
             self.task_contexts[context_id] = task_context
+            
+            # Create per-ARVO log file handler
+            arvo_log_file = run_log_dir / f"arvo_{arvo_id}.log"
+            arvo_log_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create file handler for this ARVO
+            arvo_handler = logging.FileHandler(arvo_log_file, encoding='utf-8', mode='a')
+            arvo_handler.setLevel(logging.INFO)
+            # Include context_id in log format for traceability
+            arvo_formatter = logging.Formatter(
+                f'%(asctime)s - [{context_id[:8]}] - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            arvo_handler.setFormatter(arvo_formatter)
+            
+            # Add handler to logger
+            # Disable propagation to prevent task logs from going to agents.log
+            logger.propagate = False
+            logger.addHandler(arvo_handler)
+            task_context.arvo_log_handler = arvo_handler
+            
+            logger.info(f"[GREEN] Created per-ARVO log file: {arvo_log_file}")
             
             # Read error report
             with open(error_path, "r") as f:
@@ -392,10 +441,6 @@ Example workflow (execute ONE command at a time):
 Submit your findings ONLY after you have thoroughly examined the relevant code files."""
             
             # Send task to purple agent
-            await event_queue.enqueue_event(
-                new_agent_text_message(f"Sending task {arvo_id} to purple agent...", context_id=context_id)
-            )
-            
             from agentbeats.client import send_message
             purple_response = await send_message(
                 message=task_for_purple,
@@ -403,7 +448,6 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                 context_id=context_id,  # Use same context_id
             )
             
-            logger.info(f"Purple agent response: {purple_response.get('response', 'No response')[:200]}...")
             
             return f"Task {arvo_id} initialized successfully. ARVO container ready. Task sent to purple agent. Workspace: {workspace_dir}"
         
@@ -439,7 +483,6 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         workspace_dir_str = str(task_context.workspace_dir)
         if workspace_dir_str in command:
             command = command.replace(workspace_dir_str, "/workspace")
-            logger.debug(f"Converted host path to container path in command: {command[:100]}...")
         
         # Validate command
         is_valid, error_msg = self._validate_command(command, task_context)
@@ -449,14 +492,23 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         
         # Execute command
         task_context.command_count += 1
-        logger.info(f"[GREEN] Executing command #{task_context.command_count} for task {task_context.arvo_id}: {command[:100]}...")
         
         try:
-            logger.info(f"[GREEN] Calling docker_env.execute()")
             result = task_context.docker_env.execute(command)
-            logger.info(f"[GREEN] Command executed (returncode={result.returncode}, output_length={len(result.output)})")
             
-            # Format response
+            # Create preview for terminal display (console)
+            preview = self._create_response_preview(result.output)
+            
+            # Log command executed with preview to console (INFO level)
+            logger.info(f"[GREEN] Command executed. {preview}")
+            
+            # Log full response to file (DEBUG level - only goes to file, not console)
+            full_output = result.output[:100000]  # Truncate to 100k chars for file logging
+            if len(result.output) > 100000:
+                full_output += f"\n... ({len(result.output) - 100000} more characters)"
+            logger.debug(f"[GREEN] Full command response:\n{full_output}")
+            
+            # Format full response (for purple agent)
             output_preview = result.output[:10000]  # Truncate to 10k chars
             if len(result.output) > 10000:
                 output_preview += f"\n... ({len(result.output) - 10000} more characters)"
@@ -468,10 +520,7 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
             if result.returncode != 0:
                 task_context.failed_commands += 1
                 logger.warning(f"[GREEN] Command failed (returncode={result.returncode})")
-            else:
-                logger.info(f"[GREEN] Command succeeded")
             
-            logger.info(f"[GREEN] Formatted response (length={len(response)})")
             return response
         
         except Exception as e:
@@ -491,7 +540,7 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
             try:
                 with open(loc_file) as f:
                     loc_data = json.load(f)
-                logger.info(f"Task {task_context.arvo_id} completed. Submission found.")
+                logger.info(f"[GREEN] Task {task_context.arvo_id} completed. Submission found.")
             except Exception as e:
                 logger.warning(f"Error reading submission: {e}")
         
@@ -507,6 +556,15 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
             except Exception as e:
                 logger.warning(f"[GREEN] Error cleaning up task assets: {e}", exc_info=True)
         
+        # Remove ARVO-specific log handler
+        if task_context.arvo_log_handler:
+            logger.removeHandler(task_context.arvo_log_handler)
+            task_context.arvo_log_handler.close()
+            task_context.arvo_log_handler = None
+            # Note: Don't restore propagation here - other tasks might still be running
+            # Propagation will be restored in cleanup_all_tasks when all tasks finish
+            logger.info(f"[GREEN] Removed log handler for ARVO {task_context.arvo_id}")
+        
         # Remove context
         del self.task_contexts[context_id]
         
@@ -520,7 +578,6 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         logger.info(f"[GREEN] Cleaning up {len(self.task_contexts)} active task(s)...")
         for context_id, task_context in list(self.task_contexts.items()):
             try:
-                logger.info(f"[GREEN] Cleaning up task {task_context.arvo_id} (context_id={context_id})")
                 # Cleanup Docker container
                 if task_context.docker_env:
                     task_context.docker_env.cleanup()
@@ -528,14 +585,78 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                 if task_context.agent_paths:
                     try:
                         cleanup_task_assets(task_context.agent_paths)
-                        logger.info(f"[GREEN] Cleaned up workspace for task {task_context.arvo_id}")
                     except Exception as e:
                         logger.warning(f"[GREEN] Error cleaning up workspace for task {task_context.arvo_id}: {e}", exc_info=True)
-                logger.info(f"[GREEN] Cleaned up task {task_context.arvo_id}")
+                # Remove ARVO-specific log handler
+                if task_context.arvo_log_handler:
+                    logger.removeHandler(task_context.arvo_log_handler)
+                    task_context.arvo_log_handler.close()
+                    task_context.arvo_log_handler = None
             except Exception as e:
                 logger.error(f"[GREEN] Error cleaning up task {task_context.arvo_id}: {e}", exc_info=True)
+        # Restore propagation after all handlers are removed (only if no handlers remain)
+        # Check if there are any file handlers left (excluding console handler)
+        file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+        if not file_handlers:
+            logger.propagate = True
         self.task_contexts.clear()
         logger.info("[GREEN] All tasks cleaned up")
+    
+    def _create_response_preview(self, output: str, max_length: int = 200) -> str:
+        """
+        Create a preview of the command response for terminal display.
+        - If there's reasoning/analysis text, show that
+        - If there's code, show a small snippet
+        - Otherwise show first few lines
+        """
+        if not output or len(output.strip()) == 0:
+            return "Empty output"
+        
+        # Check if output contains code (look for common code patterns)
+        code_indicators = ['#include', 'def ', 'function', 'class ', '{', '}', 'int ', 'void ', 'return ']
+        has_code = any(indicator in output for indicator in code_indicators)
+        
+        # Check if output contains reasoning/analysis (look for explanation patterns)
+        reasoning_indicators = ['because', 'reason', 'analysis', 'examine', 'investigate', 'found', 'shows', 'indicates']
+        has_reasoning = any(indicator.lower() in output.lower() for indicator in reasoning_indicators)
+        
+        # If it has reasoning text, try to extract that
+        if has_reasoning and not has_code:
+            # Take first few sentences or lines
+            lines = output.split('\n')[:3]
+            preview = '\n'.join(lines)
+            if len(output) > len(preview):
+                preview += "..."
+            if len(preview) > max_length:
+                preview = preview[:max_length] + "..."
+            return preview.strip()
+        
+        # If it has code, show a small snippet
+        if has_code:
+            lines = output.split('\n')
+            # Find first line with code
+            code_start = 0
+            for i, line in enumerate(lines):
+                if any(indicator in line for indicator in code_indicators):
+                    code_start = max(0, i - 1)  # Include one line before
+                    break
+            
+            # Show 3-5 lines of code
+            code_snippet = '\n'.join(lines[code_start:code_start + 5])
+            if len(output) > len(code_snippet):
+                code_snippet += "\n..."
+            if len(code_snippet) > max_length:
+                code_snippet = code_snippet[:max_length] + "..."
+            return f"Code snippet:\n{code_snippet.strip()}"
+        
+        # Default: show first few lines
+        lines = output.split('\n')[:3]
+        preview = '\n'.join(lines)
+        if len(output) > len(preview):
+            preview += "..."
+        if len(preview) > max_length:
+            preview = preview[:max_length] + "..."
+        return preview.strip()
     
     def _validate_command(self, command: str, task_context: TaskContext) -> tuple[bool, str]:
         """
