@@ -131,11 +131,10 @@ if __name__ == "__main__":
         # Use provided ARVO ID
         arvo_ids = [args.arvo_id]
     else:
-        # Pick ONE random task ID from config
+        # Run all tasks from scenario.toml (when no specific ARVO ID provided)
         if task_ids:
-            selected_arvo = random.choice(task_ids)
-            arvo_ids = [selected_arvo]
-            print(f"🎲 Randomly selected ARVO ID from scenario.toml: {selected_arvo}")
+            arvo_ids = task_ids
+            print(f"📋 Processing all {len(task_ids)} tasks from scenario.toml: {arvo_ids}")
         else:
             print("❌ Error: No ARVO ID provided and none found in scenario.toml")
             print("   Please provide ARVO ID: python send_task.py <arvo_id>")

@@ -198,8 +198,7 @@ class PurpleAgentExecutor:
                 "start_time": time.time(),
                 "task_initialized": False,
                 "agent": agent,  # DefaultAgent instance
-                "last_summarized_at_ratio": 0.0,  # Track when we last summarized
-                "command_history": [],  # Store commands separately (never summarized)
+                "command_history": [],  # Store commands separately (for reference)
             }
         
         task_ctx = self.task_contexts[context_id]
@@ -282,7 +281,21 @@ class PurpleAgentExecutor:
             # process this response and continue the loop.
             if response and not response.startswith("[TASK FINISHED]"):
                 result = await self._handle_green_response(response, context_id, task_ctx, event_queue)
+                # If task is finished, notify green agent so it can run evaluation
+                if result and result.startswith("[TASK FINISHED]"):
+                    logger.info("[PURPLE] Task finished, notifying green agent to run evaluation...")
+                    try:
+                        await self._send_to_green_agent("[TASK FINISHED]", context_id)
+                    except Exception as e:
+                        logger.warning(f"[PURPLE] Failed to notify green agent of task completion: {e}")
                 return result
+            # If response is already TASK FINISHED, notify green agent
+            if response and response.startswith("[TASK FINISHED]"):
+                logger.info("[PURPLE] Task finished, notifying green agent to run evaluation...")
+                try:
+                    await self._send_to_green_agent("[TASK FINISHED]", context_id)
+                except Exception as e:
+                    logger.warning(f"[PURPLE] Failed to notify green agent of task completion: {e}")
             return response
         except Exception as e:
             logger.error(f"[PURPLE] Exception in _handle_task_init after _decide_next_command: {e}", exc_info=True)
@@ -293,6 +306,14 @@ class PurpleAgentExecutor:
     ) -> str:
         """Handle response from green agent (command execution result)."""
         try:
+            # Truncate large outputs to prevent token limit issues (like rca_finder.py)
+            # Rough estimate: ~4 chars per token, so 5000 tokens = ~20k chars
+            MAX_OUTPUT_CHARS = 20000
+            if len(message) > MAX_OUTPUT_CHARS:
+                truncated = message[:MAX_OUTPUT_CHARS]
+                message = f"{truncated}\n... [Output truncated: {len(message)} chars total, showing first {MAX_OUTPUT_CHARS} chars]"
+                logger.warning(f"[PURPLE] Truncated large command output: {len(message)} chars")
+            
             # Add green agent response to context
             task_ctx["messages"].append({
                 "role": "user",
@@ -310,9 +331,24 @@ class PurpleAgentExecutor:
             if should_exit:
                 logger.info(f"[PURPLE] Exit condition: {exit_reason}")
                 return f"[TASK FINISHED] Exit reason: {exit_reason}"
-            
+
+            # Check if loc.json exists and is valid - auto-complete
+            if await self._check_completion_status(context_id):
+                logger.info("[PURPLE] loc.json found and valid, auto-completing task")
+                return "[TASK FINISHED]"
+
             # Decide next command
             result = await self._decide_next_command(context_id, task_ctx, event_queue)
+            
+            # If task is finished, notify green agent so it can run evaluation
+            if result and result.startswith("[TASK FINISHED]"):
+                logger.info("[PURPLE] Task finished, notifying green agent to run evaluation...")
+                try:
+                    # Send TASK FINISHED message to green agent
+                    await self._send_to_green_agent("[TASK FINISHED]", context_id)
+                except Exception as e:
+                    logger.warning(f"[PURPLE] Failed to notify green agent of task completion: {e}")
+            
             return result
         except Exception as e:
             logger.error(f"[PURPLE] Exception in _handle_green_response: {e}", exc_info=True)
@@ -331,27 +367,14 @@ class PurpleAgentExecutor:
         # Log step progress
         logger.info(f"[PURPLE] Step {task_ctx['step_count']}/{self.max_steps}")
         
-        # Check token usage and summarize if needed (before making LLM call)
-        token_usage_ratio = task_ctx["total_tokens"] / self.max_tokens
+        # Simple message trimming (like rca_finder.py) - no summarization
+        # Check total character count and trim if needed
+        total_chars = sum(len(str(msg.get("content", ""))) for msg in task_ctx["messages"])
+        MAX_CHARS = 80000  # ~20k tokens (4 chars per token estimate)
         
-        # At 80% usage, summarize old messages (but only if we haven't summarized recently)
-        # Prevent repeated summarization attempts
-        last_summarized = task_ctx.get("last_summarized_at_ratio", 0.0)
-        if token_usage_ratio >= 0.8 and (token_usage_ratio - last_summarized) >= 0.1:
-            logger.info(f"[PURPLE] Token usage at {token_usage_ratio*100:.1f}% ({task_ctx['total_tokens']}/{self.max_tokens} tokens) - summarizing context")
-            tokens_before = task_ctx["total_tokens"]
-            summarized = await self._summarize_old_messages(task_ctx, context_id, threshold=0.8)
-            if summarized:
-                tokens_after = task_ctx["total_tokens"]
-                tokens_saved = tokens_before - tokens_after
-                task_ctx["last_summarized_at_ratio"] = token_usage_ratio
-                logger.info(f"[PURPLE] After summarization: {tokens_after}/{self.max_tokens} ({tokens_after/self.max_tokens*100:.1f}%) - saved {tokens_saved} tokens")
-            
-            # Check again after summarization
-            token_usage_ratio = task_ctx["total_tokens"] / self.max_tokens
-            if token_usage_ratio >= 0.95:
-                logger.error(f"[PURPLE] Token usage still at {token_usage_ratio*100:.1f}% after summarization - exiting")
-                return "[TASK FINISHED] MAX_TOKENS_REACHED (after summarization attempt)"
+        if total_chars > MAX_CHARS:
+            logger.warning(f"[PURPLE] Large conversation ({total_chars} chars, ~{total_chars//4} tokens), trimming...")
+            self._trim_messages(task_ctx)
         
         try:
             agent = task_ctx.get("agent")
@@ -451,6 +474,11 @@ class PurpleAgentExecutor:
             try:
                 green_response = await self._send_to_green_agent(command_request, context_id)
                 
+                # Log response from green agent
+                response_preview = self._create_response_preview(green_response)
+                logger.info(f"[PURPLE] Received from green agent: {response_preview}")
+                logger.debug(f"[PURPLE] Full green agent response:\n{green_response}")
+                
                 # Update command history with result
                 if task_ctx["command_history"]:
                     task_ctx["command_history"][-1]["result"] = green_response
@@ -464,14 +492,73 @@ class PurpleAgentExecutor:
                         verify_response = await self._send_to_green_agent("execute: test -f /workspace/shared/loc.json && cat /workspace/shared/loc.json", context_id)
                         if "returncode>0</returncode>" in verify_response or len(verify_response.strip()) < 50:
                             logger.warning("[PURPLE] Submission file verification failed or appears empty")
-                            # Continue to let agent retry or investigate
-                            return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
+                            task_ctx["messages"].append({
+                                "role": "user",
+                                "content": f"Verification result:\n{verify_response}",
+                                "timestamp": time.time()
+                            })
+                            # Verification failed - let agent continue investigating
+                            # Process the verification result and decide next command
+                            return await self._decide_next_command(context_id, task_ctx, event_queue)
                         else:
                             logger.info("[PURPLE] Submission file verified")
                     return "[TASK FINISHED]"
                 
-                # Continue the loop
-                return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
+                # Add the command result to message history
+                task_ctx["messages"].append({
+                    "role": "user",
+                    "content": f"Command result:\n{green_response}",
+                    "timestamp": time.time()
+                })
+                
+                # Auto-detect completion: if loc.json was created/verified successfully, signal completion
+                if "loc.json" in command.lower():
+                    # Check if the response indicates successful file creation/verification
+                    if "<returncode>0</returncode>" in green_response:
+                        # If this was an echo command creating the file, verify it by reading it
+                        if command.strip().startswith("echo") and ">" in command and "/workspace/shared/loc.json" in command:
+                            # Automatically verify the file was created correctly
+                            logger.info("[PURPLE] Echo command created loc.json, verifying file content...")
+                            verify_response = await self._send_to_green_agent("execute: cat /workspace/shared/loc.json", context_id)
+                            if "<returncode>0</returncode>" in verify_response:
+                                output_match = re.search(r'<output>(.*?)</output>', verify_response, re.DOTALL)
+                                if output_match:
+                                    output_content = output_match.group(1).strip()
+                                    if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                                        try:
+                                            json.loads(output_content)
+                                            logger.info("[PURPLE] Auto-detected completion: loc.json successfully created and verified")
+                                            return "[TASK FINISHED]"
+                                        except json.JSONDecodeError as e:
+                                            if '"reasoning"' in output_content and '"locations"' in output_content:
+                                                logger.info("[PURPLE] Auto-detected completion: loc.json created (JSON may be incomplete but has required fields)")
+                                                return "[TASK FINISHED]"
+                        # For cat commands or other commands that output JSON directly
+                        elif "cat /workspace/shared/loc.json" in command.lower():
+                            # Try to extract JSON from response to validate it
+                            output_match = re.search(r'<output>(.*?)</output>', green_response, re.DOTALL)
+                            if output_match:
+                                output_content = output_match.group(1).strip()
+                                # Check if it looks like valid JSON (starts with { and contains "reasoning" or "locations")
+                                if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                                    try:
+                                        # Validate JSON structure
+                                        json.loads(output_content)
+                                        logger.info("[PURPLE] Auto-detected completion: loc.json successfully created and verified")
+                                        return "[TASK FINISHED]"
+                                    except json.JSONDecodeError as e:
+                                        # JSON might be incomplete or malformed, but if it has the right structure, still complete
+                                        # Check if it has both reasoning and locations keys (even if incomplete)
+                                        if '"reasoning"' in output_content and '"locations"' in output_content:
+                                            logger.info("[PURPLE] Auto-detected completion: loc.json created (JSON may be incomplete but has required fields)")
+                                            return "[TASK FINISHED]"
+                                        # Not valid JSON yet, continue
+                                        pass
+                
+                # Process the command result immediately and decide next command
+                # This processes one more turn (result + next command) but keeps queue open
+                # by returning promptly with the next command
+                return await self._decide_next_command(context_id, task_ctx, event_queue)
             except Exception as e:
                 logger.error(f"[PURPLE] Error sending command to green agent: {e}", exc_info=True)
                 return f"Error sending command to green agent: {str(e)}"
@@ -479,7 +566,35 @@ class PurpleAgentExecutor:
             logger.info("[PURPLE] Task finished (no command)")
             return "[TASK FINISHED]"
         else:
-            logger.warning("[PURPLE] No command extracted from LLM response")
+            # No command extracted - check if LLM says task is complete and verify loc.json
+            # Check if LLM response indicates completion (mentions "successfully", "created", "completed", etc.)
+            completion_indicators = [
+                "successfully created", "successfully written", "successfully saved",
+                "has been successfully", "is successfully created", "is successfully written",
+                "json object has been", "analysis is complete", "task is complete"
+            ]
+            llm_lower = llm_response.lower()
+            if any(indicator in llm_lower for indicator in completion_indicators) and "loc.json" in llm_lower:
+                # LLM says it's done - verify loc.json exists and is valid
+                logger.info("[PURPLE] LLM indicated completion, verifying loc.json...")
+                verify_response = await self._send_to_green_agent("execute: cat /workspace/shared/loc.json", context_id)
+                if "<returncode>0</returncode>" in verify_response:
+                    output_match = re.search(r'<output>(.*?)</output>', verify_response, re.DOTALL)
+                    if output_match:
+                        output_content = output_match.group(1).strip()
+                        if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                            try:
+                                json.loads(output_content)
+                                logger.info("[PURPLE] Auto-detected completion: loc.json verified after LLM indicated completion")
+                                return "[TASK FINISHED]"
+                            except json.JSONDecodeError as e:
+                                if '"reasoning"' in output_content and '"locations"' in output_content:
+                                    logger.info("[PURPLE] Auto-detected completion: loc.json verified (JSON may be incomplete but has required fields)")
+                                    return "[TASK FINISHED]"
+            
+            # Log what the LLM actually returned for debugging
+            logger.warning(f"[PURPLE] No command extracted from LLM response (DefaultAgent). Response preview: {llm_response[:500]}")
+            logger.debug(f"[PURPLE] Full LLM response: {llm_response}")
             task_ctx["messages"].append({
                 "role": "user",
                 "content": "Please provide a command in the format: execute: <command>",
@@ -570,23 +685,17 @@ class PurpleAgentExecutor:
             if hasattr(choice, 'finish_reason') and choice.finish_reason:
                 logger.warning(f"[PURPLE] Finish reason: {choice.finish_reason}")
             
-            # If response was truncated due to length, suggest summarizing context
+            # If response was truncated due to length, log warning
             if finish_reason == "length":
-                logger.warning(f"[PURPLE] Response truncated due to max_tokens limit. Consider summarizing context earlier.")
-                # Try to trigger summarization if we're getting close to token limit
-                token_usage_ratio = task_ctx["total_tokens"] / self.max_tokens
-                if token_usage_ratio >= 0.6:  # Trigger earlier at 60% instead of 80%
-                    logger.info(f"[PURPLE] Token usage at {token_usage_ratio*100:.1f}% - triggering early summarization")
-                    await self._summarize_old_messages(task_ctx, context_id, threshold=0.6)
+                logger.warning(f"[PURPLE] Response truncated due to max_tokens limit. Messages will be trimmed on next iteration.")
         
         prompt_tokens = response.usage.prompt_tokens
         completion_tokens = response.usage.completion_tokens
         task_ctx["total_tokens"] += prompt_tokens + completion_tokens
         
-        # Log token usage
+        # Log token usage (tracking only, no limit enforcement)
         total_tokens = task_ctx["total_tokens"]
-        token_usage_pct = (total_tokens / self.max_tokens) * 100
-        logger.info(f"[PURPLE] Token usage: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}/{self.max_tokens} ({token_usage_pct:.1f}%)")
+        logger.info(f"[PURPLE] Token usage: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens} tokens")
         
         if not llm_response or len(llm_response.strip()) == 0:
             logger.error(f"[PURPLE] LLM returned empty response (finish_reason={getattr(choice, 'finish_reason', 'unknown')})")
@@ -627,9 +736,21 @@ class PurpleAgentExecutor:
             try:
                 green_response = await self._send_to_green_agent(command_request, context_id)
                 
+                # Log response from green agent
+                response_preview = self._create_response_preview(green_response)
+                logger.info(f"[PURPLE] Received from green agent: {response_preview}")
+                logger.debug(f"[PURPLE] Full green agent response:\n{green_response}")
+                
                 # Update command history with result
                 if task_ctx["command_history"]:
                     task_ctx["command_history"][-1]["result"] = green_response
+                
+                # Add the command result to message history
+                task_ctx["messages"].append({
+                    "role": "user",
+                    "content": f"Command result:\n{green_response}",
+                    "timestamp": time.time()
+                })
                 
                 # If task is finished, verify submission file was created and then finish
                 if task_finished:
@@ -640,13 +761,71 @@ class PurpleAgentExecutor:
                         verify_response = await self._send_to_green_agent("execute: test -f /workspace/shared/loc.json && cat /workspace/shared/loc.json", context_id)
                         if "returncode>0</returncode>" in verify_response or len(verify_response.strip()) < 50:
                             logger.warning("[PURPLE] Submission file verification failed or appears empty")
-                            # Continue to let agent retry or investigate
-                            return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
+                            task_ctx["messages"].append({
+                                "role": "user",
+                                "content": f"Verification result:\n{verify_response}",
+                                "timestamp": time.time()
+                            })
+                            # Verification failed - let agent continue investigating
+                            # Process the verification result and decide next command
+                            return await self._decide_next_command(context_id, task_ctx, event_queue)
                         else:
                             logger.info("[PURPLE] Submission file verified")
                     return "[TASK FINISHED]"
+
+                # Check if loc.json was just successfully created - auto-complete even if LLM didn't signal finish
+                if "loc.json" in command.lower() and "<returncode>0</returncode>" in green_response:
+                    logger.info("[PURPLE] loc.json successfully created, auto-completing task")
+                    return "[TASK FINISHED]"
+
+                # Auto-detect completion: if loc.json was created/verified successfully, signal completion
+                if "loc.json" in command.lower():
+                    # Check if the response indicates successful file creation/verification
+                    if "<returncode>0</returncode>" in green_response:
+                        # If this was an echo command creating the file, verify it by reading it
+                        if command.strip().startswith("echo") and ">" in command and "/workspace/shared/loc.json" in command:
+                            # Automatically verify the file was created correctly
+                            logger.info("[PURPLE] Echo command created loc.json, verifying file content...")
+                            verify_response = await self._send_to_green_agent("execute: cat /workspace/shared/loc.json", context_id)
+                            if "<returncode>0</returncode>" in verify_response:
+                                output_match = re.search(r'<output>(.*?)</output>', verify_response, re.DOTALL)
+                                if output_match:
+                                    output_content = output_match.group(1).strip()
+                                    if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                                        try:
+                                            json.loads(output_content)
+                                            logger.info("[PURPLE] Auto-detected completion: loc.json successfully created and verified")
+                                            return "[TASK FINISHED]"
+                                        except json.JSONDecodeError as e:
+                                            if '"reasoning"' in output_content and '"locations"' in output_content:
+                                                logger.info("[PURPLE] Auto-detected completion: loc.json created (JSON may be incomplete but has required fields)")
+                                                return "[TASK FINISHED]"
+                        # For cat commands or other commands that output JSON directly
+                        elif "cat /workspace/shared/loc.json" in command.lower():
+                            # Try to extract JSON from response to validate it
+                            output_match = re.search(r'<output>(.*?)</output>', green_response, re.DOTALL)
+                            if output_match:
+                                output_content = output_match.group(1).strip()
+                                # Check if it looks like valid JSON (starts with { and contains "reasoning" or "locations")
+                                if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                                    try:
+                                        # Validate JSON structure
+                                        json.loads(output_content)
+                                        logger.info("[PURPLE] Auto-detected completion: loc.json successfully created and verified")
+                                        return "[TASK FINISHED]"
+                                    except json.JSONDecodeError as e:
+                                        # JSON might be incomplete or malformed, but if it has the right structure, still complete
+                                        # Check if it has both reasoning and locations keys (even if incomplete)
+                                        if '"reasoning"' in output_content and '"locations"' in output_content:
+                                            logger.info("[PURPLE] Auto-detected completion: loc.json created (JSON may be incomplete but has required fields)")
+                                            return "[TASK FINISHED]"
+                                        # Not valid JSON yet, continue
+                                        pass
                 
-                return await self._handle_green_response(green_response, context_id, task_ctx, event_queue)
+                # Process the command result immediately and decide next command
+                # This processes one more turn (result + next command) but keeps queue open
+                # by returning promptly with the next command
+                return await self._decide_next_command(context_id, task_ctx, event_queue)
             except Exception as e:
                 logger.error(f"[PURPLE] Error sending command to green agent: {e}", exc_info=True)
                 return f"Error sending command to green agent: {str(e)}"
@@ -654,7 +833,30 @@ class PurpleAgentExecutor:
             logger.info("[PURPLE] Task finished (no command)")
             return "[TASK FINISHED]"
         else:
-            logger.warning("[PURPLE] No command extracted from LLM response")
+            # No command extracted - check if LLM says task is complete and verify loc.json
+            # Check if LLM response indicates completion (mentions "successfully", "created", "completed", etc.)
+            llm_lower = llm_response.lower()
+            if "loc.json" in llm_lower:
+                # LLM says it's done - verify loc.json exists and is valid
+                logger.info("[PURPLE] LLM indicated completion, verifying loc.json...")
+                verify_response = await self._send_to_green_agent("execute: cat /workspace/shared/loc.json", context_id)
+                if "<returncode>0</returncode>" in verify_response:
+                    output_match = re.search(r'<output>(.*?)</output>', verify_response, re.DOTALL)
+                    if output_match:
+                        output_content = output_match.group(1).strip()
+                        if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                            try:
+                                json.loads(output_content)
+                                logger.info("[PURPLE] Auto-detected completion: loc.json verified after LLM indicated completion")
+                                return "[TASK FINISHED]"
+                            except json.JSONDecodeError as e:
+                                if '"reasoning"' in output_content and '"locations"' in output_content:
+                                    logger.info("[PURPLE] Auto-detected completion: loc.json verified (JSON may be incomplete but has required fields)")
+                                    return "[TASK FINISHED]"
+            
+            # Log what the LLM actually returned for debugging
+            logger.warning(f"[PURPLE] No command extracted from LLM response (manual LLM). Response preview: {llm_response[:500]}")
+            logger.debug(f"[PURPLE] Full LLM response: {llm_response}")
             task_ctx["messages"].append({
                 "role": "user",
                 "content": "Please provide a command in the format: execute: <command>",
@@ -664,51 +866,232 @@ class PurpleAgentExecutor:
     
     def _extract_command(self, text: str) -> Optional[str]:
         """Extract command from LLM response."""
-        # Look for "execute: <command>" pattern
-        pattern = r"execute:\s*(.+?)(?:\n|$)"
+        if not text or not text.strip():
+            return None
+        
+        # Look for "execute: <command>" pattern (most common)
+        # Handle both single-line and multi-line commands
+        # Capture everything until next "execute:" or double newline or end of text
+        pattern = r"execute:\s*(.+?)(?=\n\s*execute:|\n\n|$)"
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            cmd = match.group(1).strip()
+            # Remove backticks if present (LLM sometimes wraps commands in backticks)
+            cmd = cmd.strip('`').strip()
+            
+            # Check if command starts with "bash" or "sh" followed by newline (multi-line command)
+            # Pattern: bash\n<rest> or sh\n<rest>
+            bash_match = re.match(r'^(bash|sh)\s*\n(.+)$', cmd, re.DOTALL | re.IGNORECASE)
+            if bash_match:
+                shell_cmd = bash_match.group(1)
+                rest_cmd = bash_match.group(2).strip()
+                
+                # If this looks like JSON creation with echo, convert to cat with heredoc
+                if "loc.json" in rest_cmd and ("{" in rest_cmd or '"reasoning"' in rest_cmd):
+                    # Try to extract JSON content from echo command
+                    # Pattern: echo '...' > loc.json or echo "..." > loc.json
+                    json_match = re.search(r"echo\s+['\"](.*?)['\"]\s*>\s*/workspace/shared/loc\.json", rest_cmd, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group(1)
+                        # Convert to cat with heredoc format (more reliable for multi-line JSON)
+                        cmd = f"cat > /workspace/shared/loc.json << 'EOF'\n{json_content}\nEOF"
+                    else:
+                        # If we can't extract JSON, try to use the rest_cmd directly
+                        # Remove the echo part and just use what comes after
+                        # But this is a fallback - ideally we should extract the JSON
+                        cmd = rest_cmd
+                else:
+                    # Not JSON creation, use the rest_cmd directly (skip bash/sh)
+                    cmd = rest_cmd
+            
+            # Remove any trailing punctuation or extra formatting
+            cmd = re.sub(r'[\.;]$', '', cmd).strip()
+            if cmd and self._is_valid_command(cmd):
+                return cmd
+        
+        # Look for backtick-wrapped commands: `command` or ```bash\ncommand\n```
+        pattern = r"`([^`]+)`"
+        matches = re.findall(pattern, text)
+        for cmd in matches:
+            cmd = cmd.strip()
+            # Skip if it's a code block marker (bash, sh, shell, or just backticks)
+            if cmd.lower() in ['bash', 'sh', 'shell', '```bash', '```', '```sh', '```shell']:
+                continue
+            # Skip if it starts with triple backticks
+            if cmd.startswith('```'):
+                continue
+            # Remove any remaining backticks (safety measure)
+            cmd = cmd.strip('`').strip()
+            # Check if it looks like a command
+            if self._is_valid_command(cmd):
+                return cmd
+        
+        # Look for code blocks
+        pattern = r"```(?:bash|sh|shell)?\s*\n(.*?)\n```"
         match = re.search(pattern, text, re.DOTALL)
         if match:
-            return match.group(1).strip()
+            cmd = match.group(1).strip()
+            # Remove any backticks that might be in the code block content
+            cmd = cmd.strip('`').strip()
+            if self._is_valid_command(cmd):
+                return cmd
         
-        # Look for "Please run:" or "run:" followed by command (with or without bullet)
+        # Look for "Please run:" or "run:" followed by command
         pattern = r"(?:Please\s+)?run:?\s*(?:-\s*)?(.+?)(?:\n|$)"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         if match:
             cmd = match.group(1).strip()
-            # Remove any trailing punctuation or extra formatting
+            # Remove backticks if present
+            cmd = cmd.strip('`').strip()
             cmd = re.sub(r'[\.;]$', '', cmd).strip()
-            return cmd
+            if self._is_valid_command(cmd):
+                return cmd
         
-        # Look for code blocks
-        pattern = r"```bash\s*\n(.*?)\n```"
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        
-        # Look for standalone sed/grep/cat commands (common patterns)
+        # Look for standalone commands (common bash commands)
         # This is a fallback for when LLM provides reasoning with a command suggestion
-        pattern = r"(?:^|\n)\s*(?:-\s*)?(sed|grep|cat|find|ls|head|tail|wc|gcc|make|arvo)\s+[^\n]+"
-        match = re.search(pattern, text, re.MULTILINE)
+        common_commands = r"(sed|grep|cat|find|ls|head|tail|wc|gcc|make|arvo|cd|pwd|echo|grep|awk|cut|sort|uniq|diff|patch|git|svn|hg|bzr)"
+        pattern = rf"(?:^|\n)\s*(?:-\s*)?`?{common_commands}\s+[^\n`]+`?"
+        match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
         if match:
-            return match.group(0).strip().lstrip('-').strip()
+            cmd = match.group(0).strip().lstrip('-').strip().strip('`').strip()
+            if self._is_valid_command(cmd):
+                return cmd
         
         return None
+    
+    def _is_valid_command(self, cmd: str) -> bool:
+        """Check if extracted text looks like a valid bash command."""
+        if not cmd or len(cmd.strip()) < 2:
+            return False
+        
+        cmd_stripped = cmd.strip()
+        
+        # Reject code block markers
+        if cmd_stripped.startswith('```') or cmd_stripped.lower() in ['bash', 'sh', 'shell', '```bash', '```sh', '```shell']:
+            return False
+        
+        # Must contain at least one non-whitespace character that's not just punctuation
+        if not re.search(r'[a-zA-Z0-9/]', cmd_stripped):
+            return False
+        
+        # Reject filenames (common patterns: .json, .c, .h, .py, etc.)
+        if re.match(r'^[a-zA-Z0-9_/-]+\.(json|c|h|cpp|hpp|py|js|ts|java|go|rs|sh|bash)$', cmd_stripped, re.IGNORECASE):
+            return False
+        
+        # Reject function names (C-style: starts with capital letter, contains underscores, no spaces)
+        # Pattern: CapitalLetter followed by alphanumeric/underscores, no spaces, no special chars
+        if re.match(r'^[A-Z][a-zA-Z0-9_]+$', cmd_stripped) and '_' in cmd_stripped and ' ' not in cmd_stripped:
+            return False
+        
+        # Reject obviously invalid commands (just plain text, no command structure)
+        # Check if it's just lowercase words without any command-like structure
+        # This catches things like "resort in corresponding breakdown"
+        if re.match(r'^[a-z\s]+$', cmd_stripped) and not re.match(
+            r'^(sed|grep|cat|find|ls|head|tail|wc|gcc|make|arvo|cd|pwd|echo|grep|awk|cut|sort|uniq|diff|patch|git|svn|hg|bzr|test|mkdir|rm|cp|mv|chmod|chown|tar|zip|unzip|curl|wget|python|node|npm|pip)',
+            cmd_stripped,
+            re.IGNORECASE
+        ):
+            # If it's just words and doesn't start with a known command, reject it
+            # But allow if it contains paths, quotes, or other command-like characters
+            if not re.search(r'[/"\'`$<>|&;()]', cmd_stripped):
+                return False
+        
+        # Reject sentence-like text that starts with capital letter (unless it's a command)
+        if re.match(r'^[A-Z][a-z\s]+$', cmd_stripped) and not re.match(
+            r'^(Sed|Grep|Cat|Find|Ls|Head|Tail|Wc|Gcc|Make|Arvo|Cd|Pwd|Echo|Awk|Cut|Sort|Uniq|Diff|Patch|Git|Svn|Hg|Bzr)',
+            cmd_stripped
+        ):
+            # Sentence-like but not a command - reject unless it has command-like characters
+            if not re.search(r'[/"\'`$<>|&;()]', cmd_stripped):
+                return False
+        
+        return True
+    
+    def _create_response_preview(self, output: str, max_length: int = 200) -> str:
+        """Create a preview of the command response for terminal display."""
+        if not output or len(output.strip()) == 0:
+            return "Empty output"
+        
+        # Extract returncode if present
+        returncode_match = re.search(r'<returncode>(\d+)</returncode>', output)
+        returncode = returncode_match.group(1) if returncode_match else "?"
+        
+        # Extract output content
+        output_match = re.search(r'<output>(.*?)</output>', output, re.DOTALL)
+        if output_match:
+            content = output_match.group(1).strip()
+        else:
+            # No XML tags, use raw output
+            content = output.strip()
+        
+        # Create preview
+        if len(content) <= max_length:
+            preview = content
+        else:
+            preview = content[:max_length] + "..."
+        
+        # Add returncode info
+        if returncode != "?":
+            return f"returncode={returncode}, {preview}"
+        return preview
     
     def _check_exit_conditions(self, task_ctx: Dict) -> tuple[bool, str]:
         """Check if we should exit."""
         # Check max steps
         if task_ctx["step_count"] >= self.max_steps:
             return True, "MAX_STEPS_REACHED"
-        
-        # Check max tokens (after summarization attempts)
-        if task_ctx["total_tokens"] >= self.max_tokens:
-            return True, "MAX_TOKENS_REACHED"
-        
+
         # Check timeout
         if time.time() - task_ctx["start_time"] > self.timeout:
             return True, "TIMEOUT"
-        
+
         return False, ""
+
+    async def _check_completion_status(self, context_id: str) -> bool:
+        """Check if loc.json exists and contains valid submission."""
+        try:
+            verify_response = await self._send_to_green_agent("execute: cat /workspace/shared/loc.json", context_id)
+            if "<returncode>0</returncode>" in verify_response:
+                output_match = re.search(r'<output>(.*?)</output>', verify_response, re.DOTALL)
+                if output_match:
+                    output_content = output_match.group(1).strip()
+                    if output_content.startswith('{') and ('"reasoning"' in output_content or '"locations"' in output_content):
+                        try:
+                            json.loads(output_content)
+                            return True
+                        except json.JSONDecodeError:
+                            if '"reasoning"' in output_content and '"locations"' in output_content:
+                                return True
+        except Exception as e:
+            logger.debug(f"[PURPLE] Completion check failed: {e}")
+        return False
+    
+    def _trim_messages(self, task_ctx: Dict) -> None:
+        """
+        Trim messages using simple approach (like rca_finder.py):
+        - Keep system + task (first 2 messages)
+        - Keep all assistant messages (reasoning is valuable)
+        - Keep last 8 user messages (recent command results)
+        - Drop everything else
+        """
+        messages = task_ctx["messages"]
+        if len(messages) <= 10:
+            return  # Not enough messages to trim
+        
+        # Separate messages by role
+        system_and_task = messages[:2]  # Keep system + task
+        rest = messages[2:]
+        
+        # Keep all assistant messages (LLM reasoning is valuable)
+        assistant_msgs = [msg for msg in rest if msg.get("role") == "assistant"]
+        
+        # Keep recent user messages (command results) - last 8
+        user_msgs = [msg for msg in rest if msg.get("role") == "user"]
+        recent_user_msgs = user_msgs[-8:] if len(user_msgs) > 8 else user_msgs
+        
+        # Reconstruct: system + task + all assistant + recent user
+        task_ctx["messages"] = system_and_task + assistant_msgs + recent_user_msgs
+        logger.info(f"[PURPLE] Trimmed conversation: kept {len(assistant_msgs)} assistant + {len(recent_user_msgs)} recent user messages")
     
     def _is_command_message(self, msg: Dict) -> bool:
         """
@@ -975,14 +1358,14 @@ Provide a concise summary that will help the agent continue the analysis with th
             except Exception as e:
                 if "max_completion_tokens" in str(e) or "unsupported_parameter" in str(e):
                     # Fallback for older models
-                    summary_response = self._openai_client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant that summarizes conversation history for root cause analysis tasks."},
-                            {"role": "user", "content": summary_prompt}
-                        ],
-                        max_tokens=1000,  # Keep summary concise
-                    )
+                        summary_response = self._openai_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that summarizes conversation history for root cause analysis tasks."},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                max_tokens=1000,  # Keep summary concise
+            )
                 else:
                     raise
             

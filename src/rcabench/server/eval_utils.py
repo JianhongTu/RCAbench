@@ -6,7 +6,7 @@ for localization results and ground truth.
 """
 
 from pydantic import BaseModel
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import os
 import re
 
@@ -292,7 +292,7 @@ def _best_iou_same_file(
 
 class PerGT(BaseModel):
     gt: Localization
-    best_pred_idx: int | None
+    best_pred_idx: Optional[int]
     file_match: bool
     function_match_top1: bool
     line_iou_best: float

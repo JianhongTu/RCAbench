@@ -13,7 +13,7 @@ services:
   green-agent:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.green
     image: mini-swe-agent-green:latest
     container_name: green-agent
     ports:
@@ -21,14 +21,13 @@ services:
     volumes:
       - ${WORKSPACE_DIR:-./workspace}:/workspace:rw
       - /var/run/docker.sock:/var/run/docker.sock  # Access to Docker daemon
-      - ${LOG_DIR:-./logs}/green:/app/logs:rw
+      - ${LOG_DIR:-./logs}/green:/home/agent/logs:rw
       - ${TMP_DIR:-/tmp/rcabench}:/tmp/rcabench:rw
-      - ../../src:/app/src:ro  # Mount agentbeats and rcabench source
-      - ../../rcabench:/app/rcabench:ro  # Mount rcabench package
+      - ../../src:/home/agent/src:ro  # Mount agentbeats and rcabench source
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - PYTHONPATH=/app:/app/src:/app/rcabench:/workspace
-    command: python /app/green_agent_server.py --host 0.0.0.0 --port 9009
+      - PYTHONPATH=/home/agent:/home/agent/src:/workspace
+    command: ["--host", "0.0.0.0", "--port", "9009"]
     networks:
       - agent-network
     restart: unless-stopped
@@ -43,15 +42,15 @@ services:
       - "9019:9019"  # A2A server port
     volumes:
       - ${WORKSPACE_DIR:-./workspace}:/workspace:ro  # Read-only access
-      - ${LOG_DIR:-./logs}/purple:/app/logs:rw
-      - ../../src:/app/src:ro  # Mount agentbeats source
+      - ${LOG_DIR:-./logs}/purple:/home/agent/logs:rw
+      - ../../src:/home/agent/src:ro  # Mount agentbeats source
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GREEN_AGENT_URL=http://green-agent:9009/
       - MODEL=${MODEL:-gpt-4o-mini}
       - MAX_STEPS=${MAX_STEPS:-50}
-      - PYTHONPATH=/app:/app/src:/workspace
-    command: python /app/purple_agent_server.py --host 0.0.0.0 --port 9019 --green-agent-url http://green-agent:9009/
+      - PYTHONPATH=/home/agent:/home/agent/src:/workspace
+    command: ["--host", "0.0.0.0", "--port", "9019", "--green-agent-url", "http://green-agent:9009/"]
     networks:
       - agent-network
     depends_on:

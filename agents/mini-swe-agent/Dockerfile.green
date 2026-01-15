@@ -1,7 +1,9 @@
 # Dockerfile for green agent container (mini-swe-agent)
 # This container runs the green agent that controls ARVO containers
 
-FROM python:3.12-slim
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm
+
+ENV UV_HTTP_TIMEOUT=300
 
 # Install Docker CLI (to execute commands in arvo containers)
 RUN apt-get update && apt-get install -y \
@@ -9,18 +11,22 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install --no-cache-dir \
+# Install Python dependencies using UV (before creating user)
+RUN uv pip install --system \
     openai>=1.0.0 \
     docker>=7.1.0 \
     uvicorn \
     a2a-sdk
 
+# Create non-root user
+RUN adduser --disabled-password --gecos '' agent
+USER agent
+
 # Set working directory
-WORKDIR /app
+WORKDIR /home/agent
 
 # Copy agent code
-COPY docker_environment.py green_agent_server.py ./
+COPY docker_environment.py green_agent_server.py utility.py ./
 
 # Note: rcabench and agentbeats are mounted as volumes in docker-compose.yml
 # This allows live code updates without rebuilding the image
@@ -28,8 +34,11 @@ COPY docker_environment.py green_agent_server.py ./
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV DOCKER_HOST=unix:///var/run/docker.sock
-ENV PYTHONPATH=/app:/workspace
+ENV PYTHONPATH=/home/agent:/workspace
 
-# Default command
-CMD ["python", "/app/green_agent_server.py", "--host", "0.0.0.0", "--port", "9009"]
+# Expose port
+EXPOSE 9009
 
+# Use ENTRYPOINT/CMD pattern with UV
+ENTRYPOINT ["uv", "run", "green_agent_server.py"]
+CMD ["--host", "0.0.0.0", "--port", "9009"]

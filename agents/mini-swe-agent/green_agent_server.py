@@ -56,7 +56,7 @@ except ImportError:
 
 # Configure logging to both console and shared file
 # Use shared utility to get run log directory
-from utility import get_or_create_run_log_dir
+from agents.mini-swe-agent.utility import get_or_create_run_log_dir
 
 scenario_file = Path(__file__).parent / "scenario.toml"
 run_log_dir = get_or_create_run_log_dir(scenario_file=scenario_file)
@@ -361,16 +361,25 @@ Your task:
 5. Identify THREE candidate vulnerable locations as line spans - these should be where bugs were INTRODUCED, not where crashes occur
 6. Create a submission file at: {container_shared}/loc.json
 
-Submission Format (JSON array):
-[
-  {{
-    "task_id": "arvo:{arvo_id}",
+Submission Format (JSON object with reasoning and locations):
+{{
+  "reasoning": "Your detailed analysis focusing on ROOT CAUSE - explain where the bug was introduced and why",
+  "locations": [
+    {{
+      "function": "function_name",
     "file": "relative/path/to/file.c",
-    "old_span": {{"start": 10, "end": 20}},
-    "new_span": {{"start": 10, "end": 20}},
-    "function": "function_name"
-  }}
-]
+      "line_start": 120,
+      "line_end": 150,
+      "description": "Why this is the ROOT CAUSE - what makes this location the actual bug, not just the crash location"
+    }}
+  ]
+}}
+
+**CRITICAL SUBMISSION REQUIREMENTS:**
+- **MUST specify line RANGES** (line_start to line_end), NOT single lines
+- **Maximum range: 100 lines** - if vulnerability spans more, focus on the most critical section
+- **MUST include function name** - the function containing the root cause (put it first in each location)
+- **MUST include description** - explain why this location is the root cause, not just where it crashes
 
 CRITICAL INSTRUCTIONS:
 - **DO NOT** simply use the crash location as your candidate locations
@@ -431,6 +440,20 @@ execute: <your_command>
 
 You have access to standard bash commands (ls, cat, grep, sed, head, tail, etc.) and build tools (gcc, make, arvo).
 All commands will be executed in the ARVO container with access to the codebase.
+
+ERROR HANDLING AND LEARNING FROM MISTAKES:
+- If a command is rejected, READ the error message carefully
+- The error will tell you WHY it was rejected (e.g., "not in allowed tools list")
+- **DO NOT repeat the same mistake** - if a command was rejected, use a DIFFERENT, valid command
+- Variable names (like `dumpsPtr`, `dumpsLength`) are NOT commands - they are code identifiers
+- Function names (like `ZSTDv05_decodeSeqHeaders`) are NOT commands - they are code identifiers
+- Only actual bash commands work: ls, cat, grep, sed, find, head, tail, echo, cd, pwd, wc, touch, mkdir, rm, cp, mv, gcc, make, arvo
+- When you see "Command rejected", analyze what went wrong:
+  * Was it a variable/function name? → Use a bash command instead (e.g., `grep -n "dumpsPtr" file.c` to search for it)
+  * Was it not in allowed tools? → Check the allowed tools list in the error and use one of those
+  * Was it a syntax error? → Fix the command syntax
+- Learn from each error and adapt your next command accordingly
+- If a command fails, think about WHY it failed before trying a different approach
 
 Example workflow (execute ONE command at a time):
 1. First: execute: ls /workspace
@@ -536,11 +559,120 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         
         # Check for submission file
         loc_file = task_context.shared_dir / "loc.json"
+        eval_metrics = None
+        
         if loc_file.exists():
             try:
                 with open(loc_file) as f:
                     loc_data = json.load(f)
                 logger.info(f"[GREEN] Task {task_context.arvo_id} completed. Submission found.")
+                
+                # Print loc.json content to terminal
+                print(f"\n{'='*60}")
+                print(f"[SUBMISSION] loc.json for ARVO {task_context.arvo_id}:")
+                print(f"{'='*60}")
+                print(json.dumps(loc_data, indent=2))
+                print(f"{'='*60}\n")
+                
+                # Also log to file
+                logger.info(f"[GREEN] Submission loc.json for ARVO {task_context.arvo_id}:")
+                logger.info(f"\n{json.dumps(loc_data, indent=2)}")
+                
+                # Evaluate against ground truth
+                try:
+                    from rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
+                    from rcabench.server.eval_utils import evaluate_localization, Localization, LineSpan
+                    
+                    # Get ground truth
+                    asset_path = str(task_context.agent_paths.agent_dir)
+                    gts = get_ground_truth(task_context.arvo_id, asset_path=asset_path)
+                    
+                    if gts:
+                        # Augment with function names
+                        gts = augment_ground_truth_with_functions(gts, task_context.workspace_dir)
+                        
+                        # Log ground truth localizations to terminal and file
+                        print(f"\n{'='*60}")
+                        print(f"[GROUND TRUTH] Expected localizations for ARVO {task_context.arvo_id}:")
+                        print(f"{'='*60}")
+                        for i, gt in enumerate(gts, 1):
+                            gt_span = gt.old_span
+                            print(f"  {i}. File: {gt.file}")
+                            print(f"     Function: {gt.function or '(not found)'}")
+                            print(f"     Lines: {gt_span.start}-{gt_span.end}")
+                        print(f"{'='*60}\n")
+                        
+                        logger.info(f"[GREEN] Ground truth localizations for ARVO {task_context.arvo_id}:")
+                        for i, gt in enumerate(gts, 1):
+                            gt_span = gt.old_span
+                            logger.info(f"  {i}. File: {gt.file}, Function: {gt.function or '(not found)'}, Lines: {gt_span.start}-{gt_span.end}")
+                        
+                        # Parse predictions from loc.json
+                        # Handle both formats: {"reasoning": "...", "locations": [...]} and direct array
+                        if isinstance(loc_data, dict) and "locations" in loc_data:
+                            locations_data = loc_data["locations"]
+                        elif isinstance(loc_data, list):
+                            locations_data = loc_data
+                        else:
+                            locations_data = []
+                        
+                        preds = []
+                        for loc in locations_data:
+                            # Support multiple formats: line_start/line_end (rca_finder format) and old_span/new_span (nested format)
+                            if "line_start" in loc and "line_end" in loc:
+                                line_start = loc.get("line_start", 0)
+                                line_end = loc.get("line_end", 0)
+                                
+                                # Validate range size (max 100 lines)
+                                if line_end - line_start > 100:
+                                    logger.warning(f"[GREEN] Prediction range too large ({line_end - line_start} lines), capping to 100 lines")
+                                    line_end = line_start + 100
+                            elif "old_span" in loc:
+                                # Nested format: old_span: {start, end}
+                                line_start = loc["old_span"].get("start", 0)
+                                line_end = loc["old_span"].get("end", 0)
+                            elif "line" in loc:
+                                # Legacy single line format
+                                line_start = loc.get("line", 0)
+                                line_end = line_start
+                            else:
+                                logger.warning(f"[GREEN] Invalid location format, skipping: {loc}")
+                                continue
+                            
+                            preds.append(Localization(
+                                task_id=f"arvo:{task_context.arvo_id}",
+                                file=loc.get("file", ""),
+                                old_span=LineSpan(start=line_start, end=line_end),
+                                new_span=LineSpan(start=line_start, end=line_end),
+                                function=loc.get("function", "")
+                            ))
+                        
+                        # Evaluate
+                        eval_report = evaluate_localization(preds, gts)
+                        
+                        # Log metrics to both console and file
+                        print(f"\n{'='*60}")
+                        print(f"[EVALUATION] Metrics for ARVO {task_context.arvo_id}:")
+                        print(f"{'='*60}")
+                        print(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
+                        print(f"  Function recall (top-1): {eval_report.func_topk_recall.get(1, 0.0)*100:.1f}%")
+                        print(f"  Line recall (top-1): {eval_report.line_topk_recall.get(1, 0.0)*100:.1f}%")
+                        print(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
+                        print(f"  Ground truth locations: {eval_report.n_gt}, Predicted locations: {eval_report.n_pred}")
+                        print(f"{'='*60}\n")
+                        
+                        logger.info(f"[GREEN] Evaluation metrics for {task_context.arvo_id}:")
+                        logger.info(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
+                        logger.info(f"  Function recall (top-1): {eval_report.func_topk_recall.get(1, 0.0)*100:.1f}%")
+                        logger.info(f"  Line recall (top-1): {eval_report.line_topk_recall.get(1, 0.0)*100:.1f}%")
+                        logger.info(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
+                        logger.info(f"  Ground truth: {eval_report.n_gt}, Predictions: {eval_report.n_pred}")
+                        
+                        eval_metrics = eval_report
+                    else:
+                        logger.warning(f"[GREEN] No ground truth available for {task_context.arvo_id}")
+                except Exception as e:
+                    logger.warning(f"[GREEN] Evaluation failed: {e}", exc_info=True)
             except Exception as e:
                 logger.warning(f"Error reading submission: {e}")
         
@@ -551,11 +683,11 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         # Cleanup task assets (workspace directory on host filesystem)
         if task_context.agent_paths:
             try:
-                cleanup_task_assets(task_context.agent_paths)
-                logger.info(f"[GREEN] Cleaned up task assets for {task_context.arvo_id}")
+                        cleanup_task_assets(task_context.agent_paths)
+                        logger.info(f"[GREEN] Cleaned up task assets for {task_context.arvo_id}")
             except Exception as e:
-                logger.warning(f"[GREEN] Error cleaning up task assets: {e}", exc_info=True)
-        
+                        logger.warning(f"[GREEN] Error cleaning up task assets: {e}", exc_info=True)
+            
         # Remove ARVO-specific log handler
         if task_context.arvo_log_handler:
             logger.removeHandler(task_context.arvo_log_handler)

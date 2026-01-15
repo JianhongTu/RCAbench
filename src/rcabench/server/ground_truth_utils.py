@@ -13,19 +13,33 @@ Functions:
 import os
 import re
 import glob
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
-from tree_sitter import Language, Parser
-import tree_sitter_c
+
+# Optional tree-sitter imports - fallback to regex if not available
+try:
+    from tree_sitter import Language, Parser
+    import tree_sitter_c
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    Language = None
+    Parser = None
+    tree_sitter_c = None
 
 from rcabench.utils import remote_fetch_diff
 from rcabench.server.eval_utils import Localization, LineSpan
 
 # Regex patterns for parsing patch files
+# Match: diff line, optional index line, then --- a/... and +++ b/... lines
+# The filepath is captured from the +++ b/ line
 FILE_BLOCK_RE = re.compile(
-    r"^diff\s[^\n]*\n(?:^---\s+a/.*\n^\+\+\+\s+b/([^\s]+)[^\n]*\n)", re.MULTILINE
+    r"^diff\s[^\n]*\n(?:^index\s[^\n]*\n)?^---\s+a/.*\n^\+\+\+\s+b/([^\s]+)[^\n]*\n", re.MULTILINE
 )
-HUNK_RE = re.compile(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", re.MULTILINE)
+# Hunk regex: captures line numbers and function name from hunk header
+# Format: @@ -old_start,old_count +new_start,new_count @@ function_name
+HUNK_RE = re.compile(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@\s*(.*)$", re.MULTILINE)
 
 CODE_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".rs", ".go", ".py"}
 
@@ -55,12 +69,13 @@ def _iter_file_blocks(diff: str):
         yield path.strip(), diff[start:end]
 
 
-def _extract_hunk_changes(block: str, hunk_match: re.Match) -> Tuple[List[str], List[str], List[str]]:
+def _extract_hunk_changes(block: str, hunk_match: re.Match) -> Tuple[List[str], List[str], List[str], List[int]]:
     """
-    Extract the removed lines and context from a hunk.
+    Extract the removed lines, context, and line numbers from a hunk.
     
     Returns:
-        (context_before, removed_lines, context_after)
+        (context_before, removed_lines, context_after, removed_line_numbers)
+        removed_line_numbers: List of line numbers (1-indexed) where removed lines are in the source
     """
     hunk_start = hunk_match.end()  # Start after the @@ line
     hunk_text = block[hunk_start:]
@@ -75,8 +90,14 @@ def _extract_hunk_changes(block: str, hunk_match: re.Match) -> Tuple[List[str], 
     context_before = []
     removed_lines = []
     context_after = []
+    removed_line_numbers = []
     in_removed = False
     after_removed = False
+    
+    # Get the old_start line number from the hunk header
+    old_start = int(hunk_match.group(1))
+    old_count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
+    current_line = old_start
     
     for line in lines:
         if not line:
@@ -88,32 +109,37 @@ def _extract_hunk_changes(block: str, hunk_match: re.Match) -> Tuple[List[str], 
         if marker == '-':
             # This is a removed line (vulnerable code)
             removed_lines.append(content)
+            removed_line_numbers.append(current_line)
+            current_line += 1
             in_removed = True
         elif marker == '+':
-            # Skip added lines
+            # Skip added lines (they don't exist in the old file)
             if in_removed and not after_removed:
                 after_removed = True
+            # Don't increment current_line for added lines
             continue
         elif marker == ' ':
-            # Context line
+            # Context line (exists in both old and new)
             if not in_removed:
                 # Before the removed lines
                 context_before.append(content)
             elif after_removed:
                 # After the removed lines
                 context_after.append(content)
+            current_line += 1
         else:
             # Unknown marker, treat as context
             if not in_removed:
                 context_before.append(content)
             elif after_removed:
                 context_after.append(content)
+            current_line += 1
     
     # Limit context to last 3 lines before and first 3 lines after
     context_before = context_before[-3:] if len(context_before) > 3 else context_before
     context_after = context_after[:3] if len(context_after) > 3 else context_after
     
-    return context_before, removed_lines, context_after
+    return context_before, removed_lines, context_after, removed_line_numbers
 
 
 def _find_vulnerable_lines_in_file(
@@ -209,6 +235,36 @@ def _find_vulnerable_lines_in_file(
     return found_lines
 
 
+def _merge_overlapping_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """
+    Merge overlapping intervals.
+    
+    Args:
+        intervals: List of (start, end) tuples representing intervals
+    
+    Returns:
+        List of merged (start, end) tuples with no overlaps
+    """
+    if not intervals:
+        return []
+    
+    # Sort intervals by start position
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_intervals[0]]
+    
+    for current in sorted_intervals[1:]:
+        last = merged[-1]
+        # If current interval overlaps with or is adjacent to the last merged interval
+        if current[0] <= last[1] + 1:  # +1 for adjacent intervals (e.g., [1,5] and [6,10] -> [1,10])
+            # Merge them by extending the end
+            merged[-1] = (last[0], max(last[1], current[1]))
+        else:
+            # No overlap, add as new interval
+            merged.append(current)
+    
+    return merged
+
+
 def get_ground_truth(arvo_id: str, asset_path: str = "./tmp") -> List[Localization]:
     """
     Partition patch.diff into file blocks, then into hunks.
@@ -255,48 +311,84 @@ def get_ground_truth(arvo_id: str, asset_path: str = "./tmp") -> List[Localizati
             new_start = int(h.group(3))
             new_count = int(h.group(4)) if h.group(4) else 1
             
-            # Extract the removed lines and context from this hunk
-            context_before, removed_lines, context_after = _extract_hunk_changes(block, h)
+            # Extract function name from hunk header (group 5)
+            function_name_raw = h.group(5).strip() if h.group(5) else ""
+            # Extract just the function name (remove return type, parameters, etc.)
+            # Pattern: "static void FunctionName(...)" -> "FunctionName"
+            function_name = ""
+            if function_name_raw:
+                # Try to extract function name from the header
+                # Common patterns: "static void FunctionName(...)", "FunctionName(...)", etc.
+                func_match = re.search(r'(\w+)\s*\(', function_name_raw)
+                if func_match:
+                    function_name = func_match.group(1)
             
-            # Search for the vulnerable lines in the actual source file
+            # Extract the removed lines, context, and line numbers from this hunk
+            context_before, removed_lines, context_after, removed_line_numbers = _extract_hunk_changes(block, h)
+            
+            # Search for the actual line numbers in the source file
             actual_lines = _find_vulnerable_lines_in_file(
                 filepath, removed_lines, context_before, context_after, actual_asset_path
             )
             
-            # If we found the lines, use them; otherwise fall back to patch line numbers
+            # Use actual lines if found, otherwise fall back to diff line numbers
             if actual_lines:
-                # Use the actual found lines
-                line_start = min(actual_lines)
-                line_end = max(actual_lines)
-                
-                # Add ±5 line buffer to give the agent more leeway
-                buffer = 5
-                line_start_buffered = max(1, line_start - buffer)  # Don't go below line 1
-                line_end_buffered = line_end + buffer
-                
-                old_span = LineSpan(start=line_start_buffered, end=line_end_buffered)
-                new_span = LineSpan(start=line_start_buffered, end=line_end_buffered)  # For vulnerable code, use same span
+                # Use the actual found lines from the source file
+                line_numbers_to_use = actual_lines
+            elif removed_line_numbers:
+                # Fallback to diff line numbers if source file search failed
+                line_numbers_to_use = removed_line_numbers
             else:
-                # Fallback to patch line numbers (original behavior) with buffer
-                buffer = 5
-                old_start_buffered = max(1, old_start - buffer)
-                old_end_buffered = old_start + old_count - 1 + buffer
-                new_start_buffered = max(1, new_start - buffer)
-                new_end_buffered = new_start + new_count - 1 + buffer
-                
-                old_span = LineSpan(start=old_start_buffered, end=old_end_buffered)
-                new_span = LineSpan(start=new_start_buffered, end=new_end_buffered)
+                # Final fallback: create a range from patch line numbers
+                # But we still want individual lines, so create one per removed line
+                line_numbers_to_use = list(range(old_start, old_start + len(removed_lines)))
             
-            locs.append(
+            # Create intervals with ±5 buffer for each removed line
+            buffer = 5
+            for line_num in line_numbers_to_use:
+                # Each line gets a range with ±5 buffer
+                line_start_buffered = max(1, line_num - buffer)  # Don't go below line 1
+                line_end_buffered = line_num + buffer
+                
+                locs.append(
+                    Localization(
+                        task_id=task_id,
+                        file=filepath,
+                        old_span=LineSpan(start=line_start_buffered, end=line_end_buffered),
+                        new_span=LineSpan(start=line_start_buffered, end=line_end_buffered),
+                        function=function_name,
+                    )
+                )
+    
+    # Now merge overlapping intervals for the same file and function
+    # Group by (file, function)
+    grouped = defaultdict(list)
+    for loc in locs:
+        key = (loc.file, loc.function)
+        grouped[key].append(loc)
+    
+    # Merge overlapping intervals within each group
+    merged_locs = []
+    for (file, function), group_locs in grouped.items():
+        # Extract intervals from this group
+        intervals = [(loc.old_span.start, loc.old_span.end) for loc in group_locs]
+        
+        # Merge overlapping intervals
+        merged_intervals = _merge_overlapping_intervals(intervals)
+        
+        # Create one Localization per merged interval
+        for start, end in merged_intervals:
+            merged_locs.append(
                 Localization(
                     task_id=task_id,
-                    file=filepath,
-                    old_span=old_span,
-                    new_span=new_span,
-                    function="",  # Will be filled by augment_ground_truth_with_functions
+                    file=file,
+                    old_span=LineSpan(start=start, end=end),
+                    new_span=LineSpan(start=start, end=end),
+                    function=function,
                 )
             )
-    return locs
+    
+    return merged_locs
 
 
 def derive_function_name(file_path: Path, line_number: int, trace_only: bool = False) -> str:
@@ -317,69 +409,73 @@ def derive_function_name(file_path: Path, line_number: int, trace_only: bool = F
         with open(file_path, 'rb') as f:
             source_code = f.read()
         
-        # Set up tree-sitter for C
-        C_LANGUAGE = Language(tree_sitter_c.language())
-        parser = Parser(C_LANGUAGE)
-        
-        # Parse the file
-        tree = parser.parse(source_code)
-        
-        # Convert line number to byte offset
-        # Line numbers are 1-indexed, so we need line_number - 1 newlines before our target
         lines = source_code.split(b'\n')
         if line_number > len(lines):
             return ""
         
-        # Calculate byte offset for the start of the target line
-        byte_offset = sum(len(line) + 1 for line in lines[:line_number - 1])  # +1 for newline
-        target_line = line_number - 1  # 0-indexed for array access
-        
-        # Recursively search for function_definition node containing this position
-        def find_function_at_position(node, position, depth=0):
-            # Check if this position is within this node
-            if not (node.start_byte <= position <= node.end_byte):
-                return None
-            
-            # If this is a function_definition, we found it
-            if node.type == 'function_definition':
-                # Extract the function name from the declarator
-                declarator = None
-                for child in node.children:
-                    if child.type == 'function_declarator':
-                        declarator = child
-                        break
+        # Try tree-sitter first if available
+        if TREE_SITTER_AVAILABLE:
+            try:
+                # Set up tree-sitter for C
+                C_LANGUAGE = Language(tree_sitter_c.language())
+                parser = Parser(C_LANGUAGE)
                 
-                if declarator:
-                    # Find the identifier (function name) in the declarator
-                    for child in declarator.children:
-                        if child.type == 'identifier':
-                            func_name = source_code[child.start_byte:child.end_byte].decode('utf-8')
-                            return func_name
-                        # Handle pointer declarators: type *function_name(...)
-                        elif child.type == 'pointer_declarator':
-                            for subchild in child.children:
-                                if subchild.type == 'identifier':
-                                    func_name = source_code[subchild.start_byte:subchild.end_byte].decode('utf-8')
+                # Parse the file
+                tree = parser.parse(source_code)
+                
+                # Calculate byte offset for the start of the target line
+                byte_offset = sum(len(line) + 1 for line in lines[:line_number - 1])  # +1 for newline
+                target_line = line_number - 1  # 0-indexed for array access
+                
+                # Recursively search for function_definition node containing this position
+                def find_function_at_position(node, position, depth=0):
+                    # Check if this position is within this node
+                    if not (node.start_byte <= position <= node.end_byte):
+                        return None
+                    
+                    # If this is a function_definition, we found it
+                    if node.type == 'function_definition':
+                        # Extract the function name from the declarator
+                        declarator = None
+                        for child in node.children:
+                            if child.type == 'function_declarator':
+                                declarator = child
+                                break
+                        
+                        if declarator:
+                            # Find the identifier (function name) in the declarator
+                            for child in declarator.children:
+                                if child.type == 'identifier':
+                                    func_name = source_code[child.start_byte:child.end_byte].decode('utf-8')
                                     return func_name
+                                # Handle pointer declarators: type *function_name(...)
+                                elif child.type == 'pointer_declarator':
+                                    for subchild in child.children:
+                                        if subchild.type == 'identifier':
+                                            func_name = source_code[subchild.start_byte:subchild.end_byte].decode('utf-8')
+                                            return func_name
+                        
+                        # If we found the function but couldn't extract name, return empty
+                        return ""
+                    
+                    # Recursively search children
+                    for child in node.children:
+                        result = find_function_at_position(child, position, depth + 1)
+                        if result is not None:
+                            return result
+                    
+                    return None
                 
-                # If we found the function but couldn't extract name, return empty
-                return ""
-            
-            # Recursively search children
-            for child in node.children:
-                result = find_function_at_position(child, position, depth + 1)
-                if result is not None:
+                result = find_function_at_position(tree.root_node, byte_offset)
+                
+                # If tree-sitter found a function, return it
+                if result:
                     return result
-            
-            return None
+            except Exception:
+                # Tree-sitter failed, fall through to regex fallback
+                pass
         
-        result = find_function_at_position(tree.root_node, byte_offset)
-        
-        # If tree-sitter found a function, return it
-        if result:
-            return result
-        
-        # FALLBACK: Tree-sitter failed (likely due to parsing errors in complex C code)
+        # FALLBACK: Tree-sitter not available or failed (likely due to parsing errors in complex C code)
         # Use regex to search backwards for function definition
         import re
         
