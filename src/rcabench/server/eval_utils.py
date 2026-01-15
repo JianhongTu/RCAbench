@@ -308,6 +308,8 @@ class EvalReport(BaseModel):
     line_topk_recall: Dict[int, float]
     line_iou_mean: float
     line_proximity_mean: float  # Average proximity score (for same-file matches)
+    func_recall: float  # Fraction of GTs with correct function predicted
+    func_precision: float  # Fraction of predictions that matched a GT function
     per_gt: List[PerGT]
 
 
@@ -328,6 +330,8 @@ def evaluate_localization(
             line_topk_recall={k: 0.0 for k in ks},
             line_iou_mean=0.0,
             line_proximity_mean=0.0,
+            func_recall=0.0,
+            func_precision=0.0,
             per_gt=[],
         )
 
@@ -354,8 +358,18 @@ def evaluate_localization(
         # function Top-k recall (exact name & same file)
         for k in ks:
             topk = preds[:k]
-            # TODO: check function match
-            if any(_files_match(p.file, gt.file) for p in topk):
+            func_match = False
+            for p in topk:
+                if _files_match(p.file, gt.file):
+                    # Check function names if both are present
+                    if p.function and gt.function and p.function == gt.function:
+                        func_match = True
+                        break
+                    # If functions are not provided, fall back to file matching
+                    elif not p.function and not gt.function:
+                        func_match = True
+                        break
+            if func_match:
                 func_hits_by_k[k] += 1
 
         # line Top-k recall (same file, IoU>=thr on old/new spans)
@@ -390,6 +404,25 @@ def evaluate_localization(
             )
         )
 
+    # Calculate func_recall and func_precision
+    # func_recall: fraction of GTs where we predicted the correct function (same file + same function name)
+    func_matched_gts = 0
+    matched_pred_indices = set()
+    
+    for gt in gts:
+        gt_matched = False
+        for i, p in enumerate(preds):
+            # Check if file matches AND function names match (when both are non-empty)
+            if _files_match(p.file, gt.file):
+                if p.function and gt.function and p.function == gt.function:
+                    if not gt_matched:
+                        func_matched_gts += 1
+                        gt_matched = True
+                    matched_pred_indices.add(i)
+    
+    func_recall = func_matched_gts / len(gts) if gts else 0.0
+    func_precision = len(matched_pred_indices) / len(preds) if preds else 0.0
+
     n = len(gts)
     report = EvalReport(
         task_id=gts[0].task_id,
@@ -400,6 +433,8 @@ def evaluate_localization(
         line_topk_recall={k: line_hits_by_k[k] / n for k in ks},
         line_iou_mean=(sum(line_ious) / n if n else 0.0),
         line_proximity_mean=(sum(line_proximities) / n if n else 0.0),
+        func_recall=func_recall,
+        func_precision=func_precision,
         per_gt=per_gt,
     )
     return report

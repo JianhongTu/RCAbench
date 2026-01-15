@@ -70,11 +70,11 @@ def get_or_create_run_log_dir(
     scenario_file: Optional[Path] = None
 ) -> Path:
     """
-    Get or create the run log directory.
+    Get or create the run log directory with atomic locking to prevent race conditions.
     
     Priority:
     1. Check for marker file (created by test script)
-    2. Create new directory with timestamp (log_{timestamp})
+    2. Create new directory with timestamp (log_{timestamp}) - uses lock file to prevent race conditions
     
     Note: arvo_id parameter is ignored - all tasks in a run share the same log directory.
     Per-ARVO logs are stored as separate files (arvo_{arvo_id}.log) within the directory.
@@ -107,12 +107,40 @@ def get_or_create_run_log_dir(
         run_log_dir.mkdir(parents=True, exist_ok=True)
         return run_log_dir
     
-    # Create new directory with timestamp (not per-ARVO)
-    timestamp = get_run_timestamp()
-    run_log_dir = base_log_dir / f"log_{timestamp}"
+    # Use file locking to prevent race condition when multiple processes start simultaneously
+    import fcntl
+    lock_file = base_log_dir / ".log_dir_creation.lock"
     
-    run_log_dir.mkdir(parents=True, exist_ok=True)
-    return run_log_dir
+    # Open lock file (create if doesn't exist)
+    with open(lock_file, "w") as lock_fd:
+        # Acquire exclusive lock (blocks until available)
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        
+        try:
+            # Double-check if marker was created while waiting for lock
+            if marker_file.exists():
+                with open(marker_file, "r") as f:
+                    marker_path = f.read().strip()
+                if not Path(marker_path).is_absolute():
+                    run_log_dir = (base_log_dir / marker_path).resolve()
+                else:
+                    run_log_dir = Path(marker_path).resolve()
+                run_log_dir.mkdir(parents=True, exist_ok=True)
+                return run_log_dir
+            
+            # Create new directory with timestamp (not per-ARVO)
+            timestamp = get_run_timestamp()
+            run_log_dir = base_log_dir / f"log_{timestamp}"
+            run_log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Write marker file so other processes use the same directory
+            with open(marker_file, "w") as f:
+                f.write(str(run_log_dir.resolve()))
+            
+            return run_log_dir
+        finally:
+            # Release lock (happens automatically when file closes, but explicit is better)
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
 
 def create_run_log_dir(

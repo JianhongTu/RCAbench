@@ -1554,7 +1554,18 @@ async def main():
     # Register signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"[PURPLE] Received signal {signum}, cleaning up...")
+        # Flush logs immediately to ensure they're written
+        for handler in logger.handlers:
+            handler.flush()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
         executor_instance.cleanup_all_tasks()
+        logger.info(f"[PURPLE] Cleanup complete, exiting...")
+        # Flush again after cleanup
+        for handler in logger.handlers:
+            handler.flush()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
         # Exit after cleanup
         import sys
         sys.exit(0)

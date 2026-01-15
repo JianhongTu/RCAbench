@@ -106,12 +106,26 @@ def main():
 
     cfg = parse_toml(args.scenario)
 
+    # Get scenario directory to set as working directory for agents
+    scenario_dir = Path(args.scenario).parent.resolve()
+    
+    # Clean up stale marker file from any previous incomplete run
+    # This ensures each run creates a fresh log directory
+    try:
+        marker_file = scenario_dir / "logs" / ".current_run_log_dir"
+        if marker_file.exists():
+            marker_file.unlink()
+            print(f"Cleaned up stale marker file from previous run")
+    except Exception as e:
+        print(f"Warning: Could not clean up stale marker file: {e}")
+
     sink = None if args.show_logs or args.serve_only else subprocess.DEVNULL
     parent_bin = str(Path(sys.executable).parent)
     base_env = os.environ.copy()
     base_env["PATH"] = parent_bin + os.pathsep + base_env.get("PATH", "")
 
     procs = []
+    
     try:
         # start participant agents
         for p in cfg["participants"]:
@@ -124,6 +138,7 @@ def main():
                     stdout=sink, stderr=sink,
                     text=True,
                     start_new_session=True,
+                    cwd=scenario_dir,  # Run from scenario.toml directory
                 ))
 
         # start host
@@ -136,6 +151,7 @@ def main():
                 stdout=sink, stderr=sink,
                 text=True,
                 start_new_session=True,
+                cwd=scenario_dir,  # Run from scenario.toml directory
             ))
 
         # Wait for all agents to be ready
@@ -178,6 +194,17 @@ def main():
                     os.killpg(p.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+        
+        # Clean up marker file so next run creates a new log directory
+        # The marker is created by agents in scenario.toml directory
+        try:
+            scenario_dir = Path(args.scenario).parent.resolve()
+            marker_file = scenario_dir / "logs" / ".current_run_log_dir"
+            if marker_file.exists():
+                marker_file.unlink()
+                print(f"Cleaned up marker file: {marker_file}")
+        except Exception as e:
+            print(f"Warning: Could not clean up marker file: {e}")
 
 
 if __name__ == "__main__":

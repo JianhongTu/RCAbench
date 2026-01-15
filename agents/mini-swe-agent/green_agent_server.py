@@ -43,6 +43,10 @@ from a2a.utils import new_agent_text_message, new_task
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 
+# AgentBeats imports
+from agentbeats.green_executor import GreenAgent, GreenExecutor
+from agentbeats.models import EvalRequest
+
 try:
     from .docker_environment import ArvoDockerEnvironment, CommandResult
     from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
@@ -310,7 +314,14 @@ class GreenAgentExecutor:
             )
 
             # Create A2A task and updater for AgentBeats result collection
-            if hasattr(context, 'message') and context.message:
+            # Check if we're running under AgentBeats (updater provided externally)
+            if hasattr(self, '_agentbeats_updater') and context_id in self._agentbeats_updater:
+                # Use AgentBeats-provided updater
+                task_context.updater = self._agentbeats_updater[context_id]
+                task_context.task_id = None  # Not needed for AgentBeats
+                logger.info(f"[GREEN] Using AgentBeats updater for arvo:{arvo_id}")
+            elif hasattr(context, 'message') and context.message:
+                # Create own task and updater (standalone mode)
                 task = new_task(context.message)
                 task_context.task_id = task.id
                 task_context.updater = TaskUpdater(event_queue, task.id, context_id)
@@ -340,7 +351,7 @@ class GreenAgentExecutor:
                 logger.removeHandler(handler)
                 handler.close()
                 logger.debug(f"[GREEN] Removed old per-ARVO log handler: {handler.baseFilename}")
-
+            
             # Create file handler for this ARVO
             arvo_handler = logging.FileHandler(arvo_log_file, encoding='utf-8', mode='a')
             arvo_handler.setLevel(logging.INFO)
@@ -350,7 +361,7 @@ class GreenAgentExecutor:
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
             arvo_handler.setFormatter(arvo_formatter)
-
+            
             # Add handler to logger
             # Disable propagation to prevent task logs from going to agents.log
             logger.propagate = False
@@ -683,17 +694,17 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                         print(f"[EVALUATION] Metrics for ARVO {task_context.arvo_id}:")
                         print(f"{'='*60}")
                         print(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
-                        func_recall = eval_report.func_recall if hasattr(eval_report, 'func_recall') else 0.0
-                        func_precision = eval_report.func_precision if hasattr(eval_report, 'func_precision') else 0.0
-                        print(f"  Function recall: {func_recall*100:.1f}%")
-                        print(f"  Function precision: {func_precision*100:.1f}%")
+                        print(f"  Function recall: {eval_report.func_recall*100:.1f}%")
+                        print(f"  Function precision: {eval_report.func_precision*100:.1f}%")
+                        print(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
                         print(f"  Ground truth locations: {eval_report.n_gt}, Predicted locations: {eval_report.n_pred}")
                         print(f"{'='*60}\n")
-
+                        
                         logger.info(f"[GREEN] Evaluation metrics for {task_context.arvo_id}:")
                         logger.info(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
-                        logger.info(f"  Function recall: {func_recall*100:.1f}%")
-                        logger.info(f"  Function precision: {func_precision*100:.1f}%")
+                        logger.info(f"  Function recall: {eval_report.func_recall*100:.1f}%")
+                        logger.info(f"  Function precision: {eval_report.func_precision*100:.1f}%")
+                        logger.info(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
                         logger.info(f"  Ground truth: {eval_report.n_gt}, Predictions: {eval_report.n_pred}")
 
                         eval_metrics = eval_report
@@ -705,19 +716,20 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                                 "agent_id": "placeholder",  # Will be filled by agentbeats CLI
                                 "timestamp": time.time(),
                                 "file_acc": float(eval_report.file_acc),
-                                "func_recall": float(eval_report.func_recall) if hasattr(eval_report, 'func_recall') else 0.0,
-                                "func_precision": float(eval_report.func_precision) if hasattr(eval_report, 'func_precision') else 0.0,
+                                "func_recall": float(eval_report.func_recall),
+                                "func_precision": float(eval_report.func_precision),
+                                "line_iou": float(eval_report.line_iou_mean),
                                 "n_gt": int(eval_report.n_gt),
                                 "n_pred": int(eval_report.n_pred)
                             }
-                            try:
-                                await task_context.updater.add_artifact(
-                                    parts=[Part(root=DataPart(data=results))],
-                                    name="EvaluationResults"
-                                )
-                                logger.info(f"[GREEN] Added A2A artifact with evaluation results for arvo:{task_context.arvo_id}")
-                            except Exception as e:
-                                logger.warning(f"[GREEN] Failed to add A2A artifact: {e}", exc_info=True)
+                            
+                            # Always capture metrics for aggregation (don't send individual artifacts)
+                            if task_context.context_id in self._task_metrics:
+                                metrics_dict, arvo_id = self._task_metrics[task_context.context_id]
+                                metrics_dict[str(arvo_id)] = results
+                                logger.info(f"[GREEN] Captured metrics for arvo:{arvo_id} for aggregation")
+                            else:
+                                logger.warning(f"[GREEN] No task metrics dictionary found for context {task_context.context_id}")
                         else:
                             logger.warning(f"[GREEN] No updater available for arvo:{task_context.arvo_id}, cannot create A2A artifact")
 
@@ -872,6 +884,190 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         return True, "ok"
 
 
+# ============================================================================
+# AgentBeats Adapter
+# ============================================================================
+
+class RCAGreenAgentAdapter(GreenAgent):
+    """Adapter to make GreenAgentExecutor work with AgentBeats framework."""
+    
+    def __init__(self, executor: GreenAgentExecutor, purple_agent_url: str):
+        self.executor = executor
+        self.purple_agent_url = purple_agent_url
+        self._server_instance = None  # Will be set by main()
+    
+    async def _shutdown_after_delay(self):
+        """Shutdown the server after a brief delay to allow final responses to be sent."""
+        import asyncio
+        await asyncio.sleep(2)  # Give time for final artifacts to be sent
+        logger.info("[GREEN] Shutting down server...")
+        
+        # Trigger graceful server shutdown - let uvicorn exit naturally
+        # AgentBeats will detect the process exit and terminate other agents
+        if self._server_instance:
+            self._server_instance.should_exit = True
+    
+    def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
+        """Validate that the request has required fields."""
+        if "task_ids" not in request.config:
+            return False, "task_ids required in config"
+        return True, ""
+    
+    async def run_eval(self, request: EvalRequest, updater: TaskUpdater) -> None:
+        """Run evaluation for all tasks in the request."""
+        print("="*60)
+        print(f"[GREEN] 🎯 RCAGreenAgentAdapter.run_eval() CALLED!")
+        print(f"[GREEN] Request config: {request.config}")
+        print("="*60)
+        
+        task_ids = request.config.get("task_ids", [])
+        
+        # Get purple agent endpoint from participants
+        purple_endpoint = None
+        for role, endpoint in request.participants.items():
+            if "purple" in role.lower():
+                purple_endpoint = str(endpoint)
+                break
+        
+        if not purple_endpoint:
+            purple_endpoint = self.purple_agent_url
+        
+        logger.info(f"[GREEN] Processing {len(task_ids)} tasks for AgentBeats evaluation")
+        
+        # Track metrics for aggregation
+        import time as time_module
+        start_time = time_module.time()
+        task_metrics = {}
+        
+        # Process each task by directly calling the task handler
+        # This bypasses the message routing to avoid JSON parsing conflicts
+        for arvo_id in task_ids:
+            logger.info(f"[GREEN] Starting task arvo:{arvo_id}")
+            
+            context_id = str(uuid4())
+            
+            # Create mock event queue (unused but required by interface)
+            class AgentBeatsEventQueue:
+                async def enqueue_event(self, event):
+                    pass  # Events are handled directly via updater
+            
+            mock_queue = AgentBeatsEventQueue()
+            
+            # Store updater and task_metrics for the task
+            if not hasattr(self.executor, '_agentbeats_updater'):
+                self.executor._agentbeats_updater = {}
+            self.executor._agentbeats_updater[context_id] = updater
+            
+            # Store task_metrics reference for this task
+            if not hasattr(self.executor, '_task_metrics'):
+                self.executor._task_metrics = {}
+            self.executor._task_metrics[context_id] = (task_metrics, arvo_id)
+            
+            try:
+                # Directly call the task handler without going through execute()
+                # This avoids the message routing and JSON parsing issues
+                message = f"Task ID: arvo:{arvo_id}"
+                
+                # Create minimal context object
+                class MinimalContext:
+                    def __init__(self, msg):
+                        self.message = msg
+                
+                context = MinimalContext(message)
+                response = await self.executor._handle_task_from_judge(
+                    message, context_id, mock_queue, context
+                )
+                
+                # Send status update
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(
+                        f"Completed task arvo:{arvo_id}: {response}",
+                        context_id=context_id
+                    )
+                )
+            except Exception as e:
+                logger.error(f"[GREEN] Error processing task {arvo_id}: {e}", exc_info=True)
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(
+                        f"Error on task arvo:{arvo_id}: {str(e)}",
+                        context_id=context_id
+                    )
+                )
+            finally:
+                # Cleanup
+                if hasattr(self.executor, '_agentbeats_updater') and context_id in self.executor._agentbeats_updater:
+                    del self.executor._agentbeats_updater[context_id]
+                if hasattr(self.executor, '_task_metrics') and context_id in self.executor._task_metrics:
+                    del self.executor._task_metrics[context_id]
+        
+        # Calculate aggregated metrics across all tasks
+        total_time = time_module.time() - start_time
+        
+        # Clean up all tasks FIRST to restore logger.propagate
+        self.executor.cleanup_all_tasks()
+        
+        if task_metrics:
+            # Calculate mean metrics
+            file_acc_mean = sum(m.get("file_acc", 0.0) for m in task_metrics.values()) / len(task_metrics)
+            func_recall_mean = sum(m.get("func_recall", 0.0) for m in task_metrics.values()) / len(task_metrics)
+            func_precision_mean = sum(m.get("func_precision", 0.0) for m in task_metrics.values()) / len(task_metrics)
+            line_iou_mean = sum(m.get("line_iou", 0.0) for m in task_metrics.values()) / len(task_metrics)
+            
+            # Create aggregated results artifact
+            aggregate_results = {
+                "domain": "arvo_rca",
+                "file_acc_mean": float(file_acc_mean),
+                "func_recall_mean": float(func_recall_mean),
+                "func_precision_mean": float(func_precision_mean),
+                "line_iou_mean": float(line_iou_mean),
+                "n_tasks": len(task_ids),
+                "task_metrics": task_metrics,
+                "time_used": float(total_time)
+            }
+            
+            # Log aggregated results to console and file (propagation is now restored)
+            import json
+            results_json = json.dumps(aggregate_results, indent=2)
+            
+            print(f"\n{'='*60}")
+            print(f"[AGGREGATED RESULTS]")
+            print(f"{'='*60}")
+            print(results_json)
+            print(f"{'='*60}\n")
+            
+            # Also log to file (agents.log) - logger.propagate is now True
+            logger.info("="*60)
+            logger.info(f"[GREEN] AGGREGATED RESULTS:")
+            logger.info("="*60)
+            logger.info(f"\n{results_json}")
+            logger.info("="*60)
+            
+            # Submit aggregated results
+            try:
+                await updater.add_artifact(
+                    parts=[Part(root=DataPart(data=aggregate_results))],
+                    name="AggregatedEvaluationResults"
+                )
+                logger.info(f"[GREEN] Successfully submitted AggregatedEvaluationResults artifact")
+                
+                # Mark evaluation as complete so client_cli can exit
+                await updater.complete()
+                logger.info(f"[GREEN] Marked evaluation as complete")
+            except Exception as e:
+                logger.error(f"[GREEN] Failed to submit aggregated results: {e}", exc_info=True)
+        else:
+            logger.warning(f"[GREEN] No task metrics captured for aggregation!")
+        
+        logger.info(f"[GREEN] Completed all {len(task_ids)} tasks in {total_time:.2f}s")
+        
+        # Trigger graceful shutdown after evaluation completes
+        logger.info(f"[GREEN] Evaluation complete, initiating shutdown...")
+        import asyncio
+        asyncio.create_task(self._shutdown_after_delay())
+
+
 def create_agent_card(agent_name: str, card_url: str) -> AgentCard:
     """Create agent card for green agent."""
     skill = AgentSkill(
@@ -903,8 +1099,8 @@ async def main():
     parser.add_argument("--purple-agent-url", type=str, default=os.getenv("PURPLE_AGENT_URL", "http://127.0.0.1:9019/"), help="Purple agent URL for sending tasks")
     args = parser.parse_args()
     
-    # Create green agent
-    agent = GreenAgentExecutor(
+    # Create green agent executor
+    agent_executor = GreenAgentExecutor(
         tmp_dir=args.tmp_dir,
         purple_agent_url=args.purple_agent_url,
     )
@@ -912,27 +1108,61 @@ async def main():
     # Register signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"[GREEN] Received signal {signum}, cleaning up...")
-        agent.cleanup_all_tasks()
-        # Exit after cleanup
-        import sys
+        # Flush logs immediately to ensure they're written
+        for handler in logger.handlers:
+            handler.flush()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        agent_executor.cleanup_all_tasks()
+        logger.info(f"[GREEN] Cleanup complete, exiting...")
+        # Flush again after cleanup
+        for handler in logger.handlers:
+            handler.flush()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
         sys.exit(0)
     
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Create executor wrapper
-    class GreenAgentExecutorWrapper(AgentExecutor):
-        def __init__(self, agent_instance):
-            self.agent = agent_instance
+    # Always use AgentBeats evaluation mode with metric aggregation
+    print("="*60)
+    print("[GREEN] 🚀 STARTING GREEN AGENT 🚀")
+    print("="*60)
+    logger.info("[GREEN] Starting green agent with metric aggregation")
+    green_agent = RCAGreenAgentAdapter(agent_executor, args.purple_agent_url)
+    
+    # Create a dual-mode executor that can handle both AgentBeats requests and purple commands
+    class DualModeExecutor(AgentExecutor):
+        def __init__(self, green_agent_adapter, agent_executor_instance):
+            self.green_agent = green_agent_adapter
+            self.agent_executor = agent_executor_instance
+            self.agentbeats_executor = GreenExecutor(green_agent_adapter)
         
         async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-            await self.agent.execute(context, event_queue)
+            user_input = context.get_user_input()
+            
+            # Try to detect if this is an EvalRequest (JSON) or a command (plain text)
+            try:
+                # Try parsing as JSON - if it works, it's an EvalRequest
+                import json
+                json_data = json.loads(user_input)
+                if isinstance(json_data, dict) and ("participants" in json_data or "config" in json_data):
+                    # This looks like an EvalRequest - use AgentBeats executor
+                    logger.info("[GREEN] Routing to AgentBeats executor (EvalRequest detected)")
+                    await self.agentbeats_executor.execute(context, event_queue)
+                    return
+            except:
+                pass
+            
+            # Not JSON or not an EvalRequest - route to standard executor
+            logger.info("[GREEN] Routing to standard executor (command/task detected)")
+            await self.agent_executor.execute(context, event_queue)
         
         async def cancel(self, request: RequestContext, event_queue: EventQueue):
-            # Cancel not supported
             return None
     
-    executor = GreenAgentExecutorWrapper(agent)
+    executor = DualModeExecutor(green_agent, agent_executor)
     
     # Create agent card
     card_url = args.card_url or f"http://{args.host}:{args.port}/"
@@ -958,6 +1188,10 @@ async def main():
         port=args.port,
     )
     uvicorn_server = uvicorn.Server(uvicorn_config)
+    
+    # Store server instance in adapter for graceful shutdown
+    green_agent._server_instance = uvicorn_server
+    
     await uvicorn_server.serve()
 
 

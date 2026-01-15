@@ -127,6 +127,15 @@ def start_agents(scenario_file: Path, arvo_id: Optional[str] = None):
         green_process.wait()
         purple_process.wait()
         print("✅ Agents stopped")
+    finally:
+        # Clean up marker file so next run creates a new log directory
+        try:
+            marker_file = scenario_file.parent / "logs" / ".current_run_log_dir"
+            if marker_file.exists():
+                marker_file.unlink()
+                print(f"🧹 Cleaned up marker file: {marker_file}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not clean up marker file: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start agents from scenario.toml")
