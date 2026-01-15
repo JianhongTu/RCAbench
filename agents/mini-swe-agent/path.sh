@@ -2,7 +2,7 @@
 # Environment variables for mini-swe-agent
 # Source this file: source path.sh
 
-export OPENAI_API_KEY=your-api-key-here
+export OPENAI_API_KEY=OPENAI_API_KEY
 export WORKSPACE_DIR="./workspace"
 export LOG_DIR="./logs"
 export TMP_DIR="/tmp/rcabench"

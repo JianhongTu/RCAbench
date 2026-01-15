@@ -11,6 +11,7 @@ This ensures agents use the correct log directory for the task.
 
 import subprocess
 import sys
+import os
 import argparse
 from pathlib import Path
 from typing import Optional
@@ -88,18 +89,20 @@ def start_agents(scenario_file: Path, arvo_id: Optional[str] = None):
     green_process = subprocess.Popen(
         green_cmd.split(),
         cwd=script_dir,  # Run from agents/mini-swe-agent/ directory
+        env=dict(os.environ)  # Pass current environment variables
     )
     print(f"✅ Green Agent started (PID: {green_process.pid})")
-    
+
     # Small delay to let green agent start
     import time
     time.sleep(1)
-    
+
     # Start purple agent (run from script directory)
     print("Starting Purple Agent...")
     purple_process = subprocess.Popen(
         purple_cmd.split(),
         cwd=script_dir,  # Run from agents/mini-swe-agent/ directory
+        env=dict(os.environ)  # Pass current environment variables
     )
     print(f"✅ Purple Agent started (PID: {purple_process.pid})")
     

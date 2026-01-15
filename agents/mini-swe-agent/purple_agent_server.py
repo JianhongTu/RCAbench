@@ -231,10 +231,24 @@ class PurpleAgentExecutor:
         if arvo_id_match:
             arvo_id = arvo_id_match.group(1)
             
+            # Clean up any existing per-ARVO log handlers from previous tasks
+            # Remove all FileHandlers except the shared agents.log (which contains "agents.log" in its baseFilename)
+            handlers_to_remove = []
+            for handler in logger.handlers[:]:  # Copy list to avoid modification during iteration
+                if isinstance(handler, logging.FileHandler):
+                    # Keep only the shared agents.log handler
+                    if "agents.log" not in handler.baseFilename:
+                        handlers_to_remove.append(handler)
+            
+            for handler in handlers_to_remove:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.debug(f"[PURPLE] Removed old per-ARVO log handler: {handler.baseFilename}")
+
             # Create per-ARVO log file handler
             arvo_log_file = run_log_dir / f"arvo_{arvo_id}.log"
             arvo_log_file.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Create file handler for this ARVO
             arvo_handler = logging.FileHandler(arvo_log_file, encoding='utf-8', mode='a')
             arvo_handler.setLevel(logging.INFO)
@@ -244,7 +258,7 @@ class PurpleAgentExecutor:
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
             arvo_handler.setFormatter(arvo_formatter)
-            
+
             # Add handler to logger
             # Disable propagation to prevent task logs from going to agents.log
             logger.propagate = False

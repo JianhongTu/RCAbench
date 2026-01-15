@@ -36,8 +36,9 @@ from a2a.types import (
     TaskState,
     Part,
     TextPart,
+    DataPart,
 )
-from a2a.utils import new_agent_text_message
+from a2a.utils import new_agent_text_message, new_task
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -56,7 +57,7 @@ except ImportError:
 
 # Configure logging to both console and shared file
 # Use shared utility to get run log directory
-from agents.mini-swe-agent.utility import get_or_create_run_log_dir
+from utility import get_or_create_run_log_dir
 
 scenario_file = Path(__file__).parent / "scenario.toml"
 run_log_dir = get_or_create_run_log_dir(scenario_file=scenario_file)
@@ -105,7 +106,7 @@ logger.info(f"Logging to shared file: {shared_log_file}")
 
 class TaskContext:
     """Context for a single task."""
-    
+
     def __init__(self, arvo_id: str, workspace_dir: Path, shared_dir: Path, agent_paths: Optional[Any] = None):
         self.arvo_id = arvo_id
         self.workspace_dir = workspace_dir
@@ -117,6 +118,8 @@ class TaskContext:
         self.failed_commands = 0
         self.context_id: Optional[str] = None  # A2A context ID for this task
         self.arvo_log_handler: Optional[logging.FileHandler] = None  # Per-ARVO log handler
+        self.updater: Optional[TaskUpdater] = None  # A2A TaskUpdater for sending artifacts
+        self.task_id: Optional[str] = None  # A2A task ID
 
 
 class GreenAgentExecutor:
@@ -179,7 +182,7 @@ class GreenAgentExecutor:
             # No task context exists - this must be a new task from RCAJudge
             # Check if it looks like a task (contains "Task ID:" or "arvo:")
             if "Task ID:" in user_input or "arvo:" in user_input:
-                response = await self._handle_task_from_judge(user_input, context_id, event_queue)
+                response = await self._handle_task_from_judge(user_input, context_id, event_queue, context)
             else:
                 # Unknown message - acknowledge
                 logger.warning("[GREEN] Unknown message format")
@@ -248,7 +251,7 @@ class GreenAgentExecutor:
             return f"Error initializing task: {str(e)}"
     
     async def _handle_task_from_judge(
-        self, message: str, context_id: str, event_queue
+        self, message: str, context_id: str, event_queue, context
     ) -> str:
         """
         Handle task from RCAJudge (evaluator) or test script.
@@ -299,20 +302,45 @@ class GreenAgentExecutor:
                 agent_paths=agent_paths,  # Store for cleanup
             )
             task_context.context_id = context_id
-            
+
             # Initialize ARVO container
             task_context.docker_env = ArvoDockerEnvironment(
                 arvo_id=arvo_id,
                 workspace_dir=workspace_dir,
             )
-            
+
+            # Create A2A task and updater for AgentBeats result collection
+            if hasattr(context, 'message') and context.message:
+                task = new_task(context.message)
+                task_context.task_id = task.id
+                task_context.updater = TaskUpdater(event_queue, task.id, context_id)
+                # Enqueue the task
+                await event_queue.enqueue_event(task)
+                logger.info(f"[GREEN] Created A2A task {task.id} for arvo:{arvo_id}")
+            else:
+                logger.warning(f"[GREEN] No context.message available, cannot create A2A task for arvo:{arvo_id}")
+
             # Store context
             self.task_contexts[context_id] = task_context
-            
+
             # Create per-ARVO log file handler
             arvo_log_file = run_log_dir / f"arvo_{arvo_id}.log"
             arvo_log_file.parent.mkdir(parents=True, exist_ok=True)
             
+            # Clean up any existing per-ARVO log handlers from previous tasks
+            # Remove all FileHandlers except the shared agents.log (which contains "agents.log" in its baseFilename)
+            handlers_to_remove = []
+            for handler in logger.handlers[:]:  # Copy list to avoid modification during iteration
+                if isinstance(handler, logging.FileHandler):
+                    # Keep only the shared agents.log handler
+                    if "agents.log" not in handler.baseFilename:
+                        handlers_to_remove.append(handler)
+            
+            for handler in handlers_to_remove:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.debug(f"[GREEN] Removed old per-ARVO log handler: {handler.baseFilename}")
+
             # Create file handler for this ARVO
             arvo_handler = logging.FileHandler(arvo_log_file, encoding='utf-8', mode='a')
             arvo_handler.setLevel(logging.INFO)
@@ -322,7 +350,7 @@ class GreenAgentExecutor:
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
             arvo_handler.setFormatter(arvo_formatter)
-            
+
             # Add handler to logger
             # Disable propagation to prevent task logs from going to agents.log
             logger.propagate = False
@@ -650,25 +678,49 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                         # Evaluate
                         eval_report = evaluate_localization(preds, gts)
                         
-                        # Log metrics to both console and file
+                        # Log metrics to both console and file (same as task updater)
                         print(f"\n{'='*60}")
                         print(f"[EVALUATION] Metrics for ARVO {task_context.arvo_id}:")
                         print(f"{'='*60}")
                         print(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
-                        print(f"  Function recall (top-1): {eval_report.func_topk_recall.get(1, 0.0)*100:.1f}%")
-                        print(f"  Line recall (top-1): {eval_report.line_topk_recall.get(1, 0.0)*100:.1f}%")
-                        print(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
+                        func_recall = eval_report.func_recall if hasattr(eval_report, 'func_recall') else 0.0
+                        func_precision = eval_report.func_precision if hasattr(eval_report, 'func_precision') else 0.0
+                        print(f"  Function recall: {func_recall*100:.1f}%")
+                        print(f"  Function precision: {func_precision*100:.1f}%")
                         print(f"  Ground truth locations: {eval_report.n_gt}, Predicted locations: {eval_report.n_pred}")
                         print(f"{'='*60}\n")
-                        
+
                         logger.info(f"[GREEN] Evaluation metrics for {task_context.arvo_id}:")
                         logger.info(f"  File accuracy: {eval_report.file_acc*100:.1f}%")
-                        logger.info(f"  Function recall (top-1): {eval_report.func_topk_recall.get(1, 0.0)*100:.1f}%")
-                        logger.info(f"  Line recall (top-1): {eval_report.line_topk_recall.get(1, 0.0)*100:.1f}%")
-                        logger.info(f"  Line IoU mean: {eval_report.line_iou_mean:.3f}")
+                        logger.info(f"  Function recall: {func_recall*100:.1f}%")
+                        logger.info(f"  Function precision: {func_precision*100:.1f}%")
                         logger.info(f"  Ground truth: {eval_report.n_gt}, Predictions: {eval_report.n_pred}")
-                        
+
                         eval_metrics = eval_report
+
+                        # Create A2A artifact with evaluation results for AgentBeats
+                        if task_context.updater:
+                            results = {
+                                "task_id": f"arvo:{task_context.arvo_id}",
+                                "agent_id": "placeholder",  # Will be filled by agentbeats CLI
+                                "timestamp": time.time(),
+                                "file_acc": float(eval_report.file_acc),
+                                "func_recall": float(eval_report.func_recall) if hasattr(eval_report, 'func_recall') else 0.0,
+                                "func_precision": float(eval_report.func_precision) if hasattr(eval_report, 'func_precision') else 0.0,
+                                "n_gt": int(eval_report.n_gt),
+                                "n_pred": int(eval_report.n_pred)
+                            }
+                            try:
+                                await task_context.updater.add_artifact(
+                                    parts=[Part(root=DataPart(data=results))],
+                                    name="EvaluationResults"
+                                )
+                                logger.info(f"[GREEN] Added A2A artifact with evaluation results for arvo:{task_context.arvo_id}")
+                            except Exception as e:
+                                logger.warning(f"[GREEN] Failed to add A2A artifact: {e}", exc_info=True)
+                        else:
+                            logger.warning(f"[GREEN] No updater available for arvo:{task_context.arvo_id}, cannot create A2A artifact")
+
                     else:
                         logger.warning(f"[GREEN] No ground truth available for {task_context.arvo_id}")
                 except Exception as e:
