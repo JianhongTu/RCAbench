@@ -776,6 +776,12 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
             print(f"[DEBUG] ❌ loc.json NOT FOUND at {loc_file}")
             print(f"[DEBUG] No metrics will be captured for this task!")
         
+        # Signal task completion if we're in EvalRequest mode
+        if hasattr(self, '_task_completion_events') and context_id in self._task_completion_events:
+            completion_event = self._task_completion_events[context_id]
+            completion_event.set()
+            logger.info(f"[GREEN] Signaled task completion for context_id: {context_id}")
+        
         # Cleanup Docker container
         if task_context.docker_env:
             task_context.docker_env.cleanup()
@@ -938,8 +944,22 @@ class RCAGreenAgentAdapter(GreenAgent):
         await asyncio.sleep(2)  # Give time for final artifacts to be sent
         logger.info("[GREEN] Shutting down server...")
         
+        # Send shutdown signal to purple agent first
+        if self.purple_agent_url:
+            try:
+                from agentbeats.client import send_message
+                logger.info(f"[GREEN] Sending shutdown signal to purple agent at {self.purple_agent_url}")
+                await send_message(
+                    message="[SHUTDOWN]",
+                    base_url=self.purple_agent_url,
+                    context_id="shutdown",
+                )
+                logger.info("[GREEN] Shutdown signal sent to purple agent")
+                await asyncio.sleep(1)  # Give purple agent time to shut down
+            except Exception as e:
+                logger.warning(f"[GREEN] Failed to send shutdown to purple agent: {e}")
+        
         # Trigger graceful server shutdown - let uvicorn exit naturally
-        # AgentBeats will detect the process exit and terminate other agents
         if self._server_instance:
             self._server_instance.should_exit = True
     
@@ -967,6 +987,9 @@ class RCAGreenAgentAdapter(GreenAgent):
         
         if not purple_endpoint:
             purple_endpoint = self.purple_agent_url
+        
+        # Store for shutdown signaling
+        self.purple_agent_url = purple_endpoint
         
         logger.info(f"[GREEN] Processing {len(task_ids)} tasks for AgentBeats evaluation")
         
@@ -1104,15 +1127,32 @@ class RCAGreenAgentAdapter(GreenAgent):
             logger.info(f"\n{results_json}")
             logger.info("="*60)
             
-            # Submit aggregated results
+            # Create summary text for TextPart
+            summary_text = f"""Evaluation Results Summary:
+- Total Tasks: {len(task_ids)}
+- File Accuracy (mean): {file_acc_mean:.1%}
+- Function Recall (mean): {func_recall_mean:.1%}
+- Function Precision (mean): {func_precision_mean:.1%}
+- Line IoU (mean): {line_iou_mean:.3f}
+- Total Time: {total_time:.2f}s
+
+Per-task metrics:
+{chr(10).join(f"- arvo:{arvo_id}: file_acc={metrics.get('file_acc', 0.0):.1%}, func_recall={metrics.get('func_recall', 0.0):.1%}, line_iou={metrics.get('line_iou', 0.0):.3f}" for arvo_id, metrics in task_metrics.items())}
+"""
+            
+            # Submit aggregated results as "Result" artifact (AgentBeats requirement)
             try:
+                from a2a.types import Part, TextPart, DataPart
                 await updater.add_artifact(
-                    parts=[Part(root=DataPart(data=aggregate_results))],
-                    name="AggregatedEvaluationResults"
+                    parts=[
+                        Part(root=TextPart(text=summary_text)),
+                        Part(root=DataPart(data=aggregate_results)),
+                    ],
+                    name="Result"
                 )
-                logger.info(f"[GREEN] Successfully submitted AggregatedEvaluationResults artifact")
+                logger.info(f"[GREEN] Successfully submitted Result artifact with summary and data")
                 
-                # Mark evaluation as complete so client_cli can exit
+                # Mark evaluation as complete so AgentBeats knows we're done
                 await updater.complete()
                 logger.info(f"[GREEN] Marked evaluation as complete")
             except Exception as e:

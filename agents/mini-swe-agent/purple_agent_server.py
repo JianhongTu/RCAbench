@@ -129,6 +129,9 @@ class PurpleAgentExecutor:
         # Task contexts: context_id -> task state (includes DefaultAgent instance)
         self.task_contexts: Dict[str, Dict[str, Any]] = {}
         
+        # Server instance for graceful shutdown (set by main())
+        self._server_instance = None
+        
         logger.info(f"Purple Agent initialized. Green agent URL: {green_agent_url}")
         if MINI_SWE_AGENT_AVAILABLE:
             logger.info("Using mini-swe-agent DefaultAgent for LLM interaction")
@@ -162,6 +165,15 @@ class PurpleAgentExecutor:
         """
         user_input = context.get_user_input()
         context_id = context.context_id
+        
+        # Handle shutdown signal from green agent
+        if "[SHUTDOWN]" in user_input.upper():
+            logger.info("[PURPLE] Received shutdown signal from green agent")
+            self.cleanup_all_tasks()
+            # Signal server to shut down
+            if hasattr(self, '_server_instance') and self._server_instance:
+                self._server_instance.should_exit = True
+            return
         
         # Initialize task context if not exists
         if context_id not in self.task_contexts:
@@ -1640,6 +1652,10 @@ async def main():
         port=args.port,
     )
     uvicorn_server = uvicorn.Server(uvicorn_config)
+    
+    # Store server instance in executor for graceful shutdown
+    executor_instance._server_instance = uvicorn_server
+    
     await uvicorn_server.serve()
 
 
