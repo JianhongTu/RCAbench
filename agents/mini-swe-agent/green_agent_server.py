@@ -764,6 +764,11 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         # Remove context
         del self.task_contexts[context_id]
         
+        # Signal completion to run_eval (if waiting)
+        if hasattr(self, '_task_completion_events') and context_id in self._task_completion_events:
+            self._task_completion_events[context_id].set()
+            logger.info(f"[GREEN] Signaled completion for context {context_id}")
+        
         execution_time = time.time() - task_context.start_time
         metrics = f"Commands executed: {task_context.command_count}, Failed: {task_context.failed_commands}, Time: {execution_time:.1f}s"
         
@@ -963,6 +968,13 @@ class RCAGreenAgentAdapter(GreenAgent):
                 self.executor._task_metrics = {}
             self.executor._task_metrics[context_id] = (task_metrics, arvo_id)
             
+            # Create completion event for this task
+            import asyncio
+            completion_event = asyncio.Event()
+            if not hasattr(self.executor, '_task_completion_events'):
+                self.executor._task_completion_events = {}
+            self.executor._task_completion_events[context_id] = completion_event
+            
             try:
                 # Directly call the task handler without going through execute()
                 # This avoids the message routing and JSON parsing issues
@@ -978,11 +990,25 @@ class RCAGreenAgentAdapter(GreenAgent):
                     message, context_id, mock_queue, context
                 )
                 
-                # Send status update
+                # Send initial status update
                 await updater.update_status(
                     TaskState.working,
                     new_agent_text_message(
-                        f"Completed task arvo:{arvo_id}: {response}",
+                        f"Task arvo:{arvo_id} initialized: {response}",
+                        context_id=context_id
+                    )
+                )
+                
+                # Wait for task to actually complete (when _handle_task_finished is called)
+                logger.info(f"[GREEN] Waiting for task arvo:{arvo_id} to complete...")
+                await completion_event.wait()
+                logger.info(f"[GREEN] Task arvo:{arvo_id} completed!")
+                
+                # Send completion status update
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(
+                        f"Completed task arvo:{arvo_id}",
                         context_id=context_id
                     )
                 )
@@ -996,9 +1022,11 @@ class RCAGreenAgentAdapter(GreenAgent):
                     )
                 )
             finally:
-                # Cleanup updater but keep metrics for aggregation
+                # Cleanup updater and completion event but keep metrics for aggregation
                 if hasattr(self.executor, '_agentbeats_updater') and context_id in self.executor._agentbeats_updater:
                     del self.executor._agentbeats_updater[context_id]
+                if hasattr(self.executor, '_task_completion_events') and context_id in self.executor._task_completion_events:
+                    del self.executor._task_completion_events[context_id]
                 # DON'T delete _task_metrics here - we need them for aggregation!
         
         # Calculate aggregated metrics across all tasks
