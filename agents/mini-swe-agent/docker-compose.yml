@@ -47,7 +47,7 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GREEN_AGENT_URL=http://green-agent:9009/
-      - MODEL=${MODEL:-gpt-4o-mini}
+      - MODEL=${MODEL}
       - MAX_STEPS=${MAX_STEPS:-50}
       - PYTHONPATH=/home/agent:/home/agent/src:/workspace
     command: ["--host", "0.0.0.0", "--port", "9019", "--green-agent-url", "http://green-agent:9009/"]
