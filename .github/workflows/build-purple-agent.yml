@@ -2,7 +2,7 @@ name: Build Purple Agent Docker Image
 
 on:
   push:
-    branches: [ main, simplify-mini-swe-agent-setup ]
+    branches: [ simplify-mini-swe-agent-setup ]
     paths:
       - 'agents/mini-swe-agent/**'
       - 'src/**'
