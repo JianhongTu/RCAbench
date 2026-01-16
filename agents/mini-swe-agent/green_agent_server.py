@@ -996,11 +996,10 @@ class RCAGreenAgentAdapter(GreenAgent):
                     )
                 )
             finally:
-                # Cleanup
+                # Cleanup updater but keep metrics for aggregation
                 if hasattr(self.executor, '_agentbeats_updater') and context_id in self.executor._agentbeats_updater:
                     del self.executor._agentbeats_updater[context_id]
-                if hasattr(self.executor, '_task_metrics') and context_id in self.executor._task_metrics:
-                    del self.executor._task_metrics[context_id]
+                # DON'T delete _task_metrics here - we need them for aggregation!
         
         # Calculate aggregated metrics across all tasks
         total_time = time_module.time() - start_time
@@ -1061,6 +1060,10 @@ class RCAGreenAgentAdapter(GreenAgent):
             logger.warning(f"[GREEN] No task metrics captured for aggregation!")
         
         logger.info(f"[GREEN] Completed all {len(task_ids)} tasks in {total_time:.2f}s")
+        
+        # Clean up stored metrics after aggregation
+        if hasattr(self.executor, '_task_metrics'):
+            self.executor._task_metrics.clear()
         
         # Trigger graceful shutdown after evaluation completes
         logger.info(f"[GREEN] Evaluation complete, initiating shutdown...")
