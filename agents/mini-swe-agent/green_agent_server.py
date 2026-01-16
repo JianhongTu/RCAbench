@@ -592,12 +592,30 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
     
     async def _handle_task_finished(self, context_id: str, event_queue) -> str:
         """Handle task completion."""
+        print(f"\n{'='*60}")
+        print(f"[DEBUG] _handle_task_finished called for context_id: {context_id}")
+        print(f"{'='*60}")
+        
         task_context = self.task_contexts.get(context_id)
         if not task_context:
+            print(f"[DEBUG] ERROR: Task context not found for {context_id}")
             return "Error: Task not found."
+        
+        print(f"[DEBUG] Task context found for arvo_id: {task_context.arvo_id}")
+        print(f"[DEBUG] shared_dir: {task_context.shared_dir}")
+        print(f"[DEBUG] context_id stored in task_context: {task_context.context_id}")
         
         # Check for submission file
         loc_file = task_context.shared_dir / "loc.json"
+        print(f"[DEBUG] Checking for loc.json at: {loc_file}")
+        print(f"[DEBUG] loc_file.exists(): {loc_file.exists()}")
+        
+        # List contents of shared_dir
+        if task_context.shared_dir.exists():
+            print(f"[DEBUG] Contents of shared_dir: {list(task_context.shared_dir.iterdir())}")
+        else:
+            print(f"[DEBUG] shared_dir does not exist!")
+        
         eval_metrics = None
         
         if loc_file.exists():
@@ -724,12 +742,18 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                             }
                             
                             # Always capture metrics for aggregation (don't send individual artifacts)
+                            print(f"[DEBUG] Checking _task_metrics for context_id: {task_context.context_id}")
+                            print(f"[DEBUG] _task_metrics keys: {list(self._task_metrics.keys()) if hasattr(self, '_task_metrics') else 'NOT SET'}")
+                            
                             if task_context.context_id in self._task_metrics:
                                 metrics_dict, arvo_id = self._task_metrics[task_context.context_id]
                                 metrics_dict[str(arvo_id)] = results
                                 logger.info(f"[GREEN] Captured metrics for arvo:{arvo_id} for aggregation")
+                                print(f"[DEBUG] ✅ METRICS CAPTURED for arvo:{arvo_id}")
+                                print(f"[DEBUG] Results: {results}")
                             else:
                                 logger.warning(f"[GREEN] No task metrics dictionary found for context {task_context.context_id}")
+                                print(f"[DEBUG] ❌ No task metrics dictionary found for context {task_context.context_id}")
                         else:
                             logger.warning(f"[GREEN] No updater available for arvo:{task_context.arvo_id}, cannot create A2A artifact")
 
@@ -739,6 +763,10 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                     logger.warning(f"[GREEN] Evaluation failed: {e}", exc_info=True)
             except Exception as e:
                 logger.warning(f"Error reading submission: {e}")
+                print(f"[DEBUG] Error reading submission: {e}")
+        else:
+            print(f"[DEBUG] ❌ loc.json NOT FOUND at {loc_file}")
+            print(f"[DEBUG] No metrics will be captured for this task!")
         
         # Cleanup Docker container
         if task_context.docker_env:
@@ -763,11 +791,6 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         
         # Remove context
         del self.task_contexts[context_id]
-        
-        # Signal completion to run_eval (if waiting)
-        if hasattr(self, '_task_completion_events') and context_id in self._task_completion_events:
-            self._task_completion_events[context_id].set()
-            logger.info(f"[GREEN] Signaled completion for context {context_id}")
         
         execution_time = time.time() - task_context.start_time
         metrics = f"Commands executed: {task_context.command_count}, Failed: {task_context.failed_commands}, Time: {execution_time:.1f}s"
@@ -967,6 +990,8 @@ class RCAGreenAgentAdapter(GreenAgent):
             if not hasattr(self.executor, '_task_metrics'):
                 self.executor._task_metrics = {}
             self.executor._task_metrics[context_id] = (task_metrics, arvo_id)
+            print(f"[DEBUG] Stored task_metrics for context_id: {context_id}, arvo_id: {arvo_id}")
+            print(f"[DEBUG] _task_metrics keys after storing: {list(self.executor._task_metrics.keys())}")
             
             # Create completion event for this task
             import asyncio
