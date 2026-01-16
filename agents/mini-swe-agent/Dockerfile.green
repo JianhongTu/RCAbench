@@ -26,15 +26,18 @@ USER agent
 WORKDIR /home/agent
 
 # Copy agent code
-COPY docker_environment.py green_agent_server.py utility.py ./
+COPY agents/mini-swe-agent/docker_environment.py agents/mini-swe-agent/green_agent_server.py agents/mini-swe-agent/utility.py ./
 
-# Note: rcabench and agentbeats are mounted as volumes in docker-compose.yml
-# This allows live code updates without rebuilding the image
+# Copy src directory for agentbeats and rcabench modules
+COPY src/ /home/agent/src/
+
+# Note: For docker-compose, src/ can be mounted as volume for live updates
+# For standalone deployment (AgentBeats), src/ is baked into the image
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV DOCKER_HOST=unix:///var/run/docker.sock
-ENV PYTHONPATH=/home/agent:/workspace
+ENV PYTHONPATH=/home/agent:/home/agent/src:/workspace
 
 # Expose port
 EXPOSE 9009

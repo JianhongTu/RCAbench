@@ -25,14 +25,17 @@ USER agent
 WORKDIR /home/agent
 
 # Copy agent code
-COPY purple_agent_server.py a2a_environment.py utility.py ./
+COPY agents/mini-swe-agent/purple_agent_server.py agents/mini-swe-agent/a2a_environment.py agents/mini-swe-agent/utility.py ./
 
-# Note: agentbeats is mounted as volume in docker-compose.yml
-# This allows live code updates without rebuilding the image
+# Copy src directory for agentbeats module
+COPY src/ /home/agent/src/
+
+# Note: For docker-compose, src/ can be mounted as volume for live updates
+# For standalone deployment (AgentBeats), src/ is baked into the image
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/home/agent:/workspace
+ENV PYTHONPATH=/home/agent:/home/agent/src:/workspace
 
 # Expose port
 EXPOSE 9019
