@@ -387,7 +387,8 @@ class GreenAgentExecutor:
 Task ID: arvo:{arvo_id}
 
 Workspace Directory: {container_workspace}
-The vulnerable codebase is located at: {container_codebase}
+The vulnerable codebase is located at: /src (this is where the ARVO container has the pre-built vulnerable code)
+Alternative location: {container_codebase} (if mounted correctly)
 
 Fuzzer Crash Report:
 {error_report}
@@ -471,7 +472,9 @@ Let me read the calling function to trace the root cause.
 execute: grep -n "function_X" /workspace/src-vul/file.c
 ```
 
-You can use bash commands to explore and analyze the codebase. All commands will be executed in the workspace directory ({container_workspace}).
+You are confined to use only these bash commands: ["ls", "cat", "touch", "sed", "grep", "find", "head", "tail", "wc", "echo", "cd", "pwd", "gcc", "make", "arvo", "mkdir", "rm", "cp", "mv"]
+All commands will be executed in the ARVO container with access to the codebase. 
+All commands will be executed in the workspace directory ({container_workspace}).
 Commands attempting to access files outside the workspace will be rejected.
 
 To execute commands, use this format:
@@ -484,8 +487,6 @@ execute: <your_command>
 - ✅ CORRECT: `execute: cat /workspace/src-vul/file.c` (cat is the command, path is the argument)
 - ✅ CORRECT: `execute: grep -n "pattern" /workspace/src-vul/file.c`
 
-You have access to standard bash commands (ls, cat, grep, sed, head, tail, etc.) and build tools (gcc, make, arvo).
-All commands will be executed in the ARVO container with access to the codebase.
 
 ERROR HANDLING AND LEARNING FROM MISTAKES:
 - If a command is rejected, READ the error message carefully
