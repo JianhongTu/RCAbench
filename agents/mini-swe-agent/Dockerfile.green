@@ -16,7 +16,7 @@ RUN uv pip install --system \
     openai>=1.0.0 \
     docker>=7.1.0 \
     uvicorn \
-    a2a-sdk
+    "a2a-sdk[http-server]"
 
 # Create non-root user
 RUN adduser --disabled-password --gecos '' agent
