@@ -1039,7 +1039,7 @@ class RCAGreenAgentAdapter(GreenAgent):
                 
                 # Send completion status update
                 await updater.update_status(
-                    TaskState.working,
+                    TaskState.completed,
                     new_agent_text_message(
                         f"Completed task arvo:{arvo_id}",
                         context_id=context_id
@@ -1048,7 +1048,7 @@ class RCAGreenAgentAdapter(GreenAgent):
             except Exception as e:
                 logger.error(f"[GREEN] Error processing task {arvo_id}: {e}", exc_info=True)
                 await updater.update_status(
-                    TaskState.working,
+                    TaskState.failed,
                     new_agent_text_message(
                         f"Error on task arvo:{arvo_id}: {str(e)}",
                         context_id=context_id
