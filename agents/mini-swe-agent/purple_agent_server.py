@@ -471,7 +471,9 @@ class PurpleAgentExecutor:
         task_finished = "[TASK FINISHED]" in llm_response.upper()
         
         # Extract command from LLM response
+        print(f"\n[DEBUG] LLM response (first 500 chars): {llm_response[:500]}...")
         command = self._extract_command(llm_response)
+        print(f"[DEBUG] Extracted command: {command}")
         
         if command:
             # Send command to green agent
@@ -982,6 +984,13 @@ class PurpleAgentExecutor:
         
         # Reject code block markers
         if cmd_stripped.startswith('```') or cmd_stripped.lower() in ['bash', 'sh', 'shell', '```bash', '```sh', '```shell']:
+            return False
+        
+        # Reject bare paths (like /workspace, /tmp, etc.) - these are not commands!
+        # A path starting with / but no command is invalid
+        if re.match(r'^/[a-zA-Z0-9_/-]+$', cmd_stripped):
+            print(f"[DEBUG] Rejecting bare path as invalid command: '{cmd_stripped}'")
+            logger.warning(f"[PURPLE] Rejected bare path as command: '{cmd_stripped}' - paths need a command prefix like 'ls', 'cat', etc.")
             return False
         
         # Must contain at least one non-whitespace character that's not just punctuation
@@ -1498,12 +1507,28 @@ Provide a concise summary that will help the agent continue the analysis with th
         try:
             logger.info(f"[PURPLE] Sending to green agent (url={self.green_agent_url}, context_id={context_id})")
             logger.debug(f"[PURPLE] Message: {message[:200]}...")
+            
+            # Print communication for debugging
+            print(f"\n{'='*60}")
+            print(f"[PURPLE → GREEN] Sending message:")
+            print(f"  Context ID: {context_id}")
+            print(f"  Message: {message[:500]}{'...' if len(message) > 500 else ''}")
+            print(f"{'='*60}")
+            
             outputs = await send_message(
                 message=message,
                 base_url=self.green_agent_url,
                 context_id=context_id,
             )
             response = outputs.get("response", "")
+            
+            # Print response for debugging
+            print(f"\n{'='*60}")
+            print(f"[GREEN → PURPLE] Received response:")
+            print(f"  Context ID: {context_id}")
+            print(f"  Response: {response[:500]}{'...' if len(response) > 500 else ''}")
+            print(f"{'='*60}\n")
+            
             return response
         except Exception as e:
             logger.error(f"[PURPLE] Error sending to green agent: {e}", exc_info=True)

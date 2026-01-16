@@ -477,6 +477,13 @@ Commands attempting to access files outside the workspace will be rejected.
 To execute commands, use this format:
 execute: <your_command>
 
+**IMPORTANT: Commands must START with a bash command, not a path!**
+- ❌ WRONG: `execute: /workspace` (path alone is NOT a command)
+- ❌ WRONG: `execute: /workspace/src-vul/file.c` (path alone is NOT a command)  
+- ✅ CORRECT: `execute: ls /workspace` (ls is the command, /workspace is the argument)
+- ✅ CORRECT: `execute: cat /workspace/src-vul/file.c` (cat is the command, path is the argument)
+- ✅ CORRECT: `execute: grep -n "pattern" /workspace/src-vul/file.c`
+
 You have access to standard bash commands (ls, cat, grep, sed, head, tail, etc.) and build tools (gcc, make, arvo).
 All commands will be executed in the ARVO container with access to the codebase.
 
