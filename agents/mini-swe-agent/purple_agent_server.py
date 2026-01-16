@@ -132,6 +132,9 @@ class PurpleAgentExecutor:
         # Server instance for graceful shutdown (set by main())
         self._server_instance = None
         
+        # Shutdown flag to prevent processing new messages
+        self._shutting_down = False
+        
         logger.info(f"Purple Agent initialized. Green agent URL: {green_agent_url}")
         if MINI_SWE_AGENT_AVAILABLE:
             logger.info("Using mini-swe-agent DefaultAgent for LLM interaction")
@@ -169,10 +172,16 @@ class PurpleAgentExecutor:
         # Handle shutdown signal from green agent
         if "[SHUTDOWN]" in user_input.upper():
             logger.info("[PURPLE] Received shutdown signal from green agent")
+            self._shutting_down = True
             self.cleanup_all_tasks()
             # Signal server to shut down
             if hasattr(self, '_server_instance') and self._server_instance:
                 self._server_instance.should_exit = True
+            return
+        
+        # Check if we're shutting down - ignore new messages
+        if self._shutting_down:
+            logger.info("[PURPLE] Ignoring message - server is shutting down")
             return
         
         # Initialize task context if not exists

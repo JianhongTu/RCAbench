@@ -154,6 +154,9 @@ class GreenAgentExecutor:
         # Purple agent URL (for sending tasks)
         self.purple_agent_url = purple_agent_url or os.getenv("PURPLE_AGENT_URL", "http://127.0.0.1:9019/")
         
+        # Shutdown flag to prevent processing new messages after evaluation completes
+        self._shutting_down = False
+        
         logger.info("Green Agent initialized")
         logger.info(f"Allowed tools: {', '.join(self.allowed_tools)}")
         logger.info(f"Purple agent URL: {self.purple_agent_url}")
@@ -166,6 +169,11 @@ class GreenAgentExecutor:
         2. Command execution requests (from Purple Agent)
         3. Task completion
         """
+        # Check if we're shutting down - ignore new messages
+        if self._shutting_down:
+            logger.info("[GREEN] Ignoring message - server is shutting down")
+            return
+        
         user_input = context.get_user_input()
         context_id = context.context_id
         
@@ -937,10 +945,16 @@ class RCAGreenAgentAdapter(GreenAgent):
         self.executor = executor
         self.purple_agent_url = purple_agent_url
         self._server_instance = None  # Will be set by main()
+        self._shutting_down = False  # Flag to prevent processing new messages after shutdown
     
     async def _shutdown_after_delay(self):
         """Shutdown the server after a brief delay to allow final responses to be sent."""
         import asyncio
+        
+        # Set shutdown flag immediately to prevent processing new messages
+        self._shutting_down = True
+        self.executor._shutting_down = True  # Also set on executor
+        
         await asyncio.sleep(2)  # Give time for final artifacts to be sent
         logger.info("[GREEN] Shutting down server...")
         
@@ -1060,18 +1074,20 @@ class RCAGreenAgentAdapter(GreenAgent):
                 await completion_event.wait()
                 logger.info(f"[GREEN] Task arvo:{arvo_id} completed!")
                 
-                # Send completion status update
+                # Log progress (but don't mark as completed - save that for the end)
                 await updater.update_status(
-                    TaskState.completed,
+                    TaskState.working,
                     new_agent_text_message(
-                        f"Completed task arvo:{arvo_id}",
+                        f"Finished task arvo:{arvo_id}",
                         context_id=context_id
                     )
                 )
             except Exception as e:
                 logger.error(f"[GREEN] Error processing task {arvo_id}: {e}", exc_info=True)
+                # Log error but don't mark entire evaluation as failed
+                # Individual task errors are captured in metrics
                 await updater.update_status(
-                    TaskState.failed,
+                    TaskState.working,
                     new_agent_text_message(
                         f"Error on task arvo:{arvo_id}: {str(e)}",
                         context_id=context_id
@@ -1151,12 +1167,16 @@ Per-task metrics:
                     name="Result"
                 )
                 logger.info(f"[GREEN] Successfully submitted Result artifact with summary and data")
-                
-                # Mark evaluation as complete so AgentBeats knows we're done
+            except Exception as e:
+                logger.error(f"[GREEN] Failed to submit Result artifact: {e}", exc_info=True)
+            
+            # Mark evaluation as complete so AgentBeats knows we're done
+            try:
                 await updater.complete()
                 logger.info(f"[GREEN] Marked evaluation as complete")
             except Exception as e:
-                logger.error(f"[GREEN] Failed to submit aggregated results: {e}", exc_info=True)
+                # Task may already be in terminal state if client disconnected
+                logger.warning(f"[GREEN] Could not mark complete (may already be done): {e}")
         else:
             logger.warning(f"[GREEN] No task metrics captured for aggregation!")
         
