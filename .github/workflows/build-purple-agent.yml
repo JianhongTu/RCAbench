@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: shubham2345/rcabench/rcabench-purple-agent
+  IMAGE_NAME: ${{ github.repository_owner }}/rcabench/rcabench-purple-agent
 
 jobs:
   build-and-push:

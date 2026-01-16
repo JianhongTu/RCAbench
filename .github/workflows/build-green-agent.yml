@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: shubham2345/rcabench/rcabench-green-agent
+  IMAGE_NAME: ${{ github.repository_owner }}/rcabench/rcabench-green-agent
 
 jobs:
   build-and-push:
