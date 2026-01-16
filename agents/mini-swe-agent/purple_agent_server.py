@@ -125,17 +125,21 @@ class PurpleAgentExecutor:
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.timeout = timeout
-        
+
         # Task contexts: context_id -> task state (includes DefaultAgent instance)
         self.task_contexts: Dict[str, Dict[str, Any]] = {}
-        
+
         # Server instance for graceful shutdown (set by main())
         self._server_instance = None
-        
+
         # Shutdown flag to prevent processing new messages
         self._shutting_down = False
-        
+
+        # Log which model is being used
+        model_source = "environment variable" if os.getenv("MODEL") else "default"
         logger.info(f"Purple Agent initialized. Green agent URL: {green_agent_url}")
+        logger.info(f"🤖 Using LLM model: {self.model} (from {model_source})")
+        print(f"🤖 Purple Agent using LLM model: {self.model} (from {model_source})")
         if MINI_SWE_AGENT_AVAILABLE:
             logger.info("Using mini-swe-agent DefaultAgent for LLM interaction")
         else:
