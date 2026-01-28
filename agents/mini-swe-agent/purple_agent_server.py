@@ -1588,7 +1588,7 @@ async def main():
     parser.add_argument("--port", type=int, default=9019)
     parser.add_argument("--card-url", type=str, help="External URL to provide in the agent card")
     parser.add_argument("--green-agent-url", type=str, default="http://127.0.0.1:9009/", help="Green agent URL")
-    parser.add_argument("--model", type=str, default="gpt-4o", help="LLM model (e.g., gpt-4o, gpt-4-turbo, gpt-4o-mini)")
+    parser.add_argument("--model", type=str, default=os.getenv("MODEL", "gpt-4o"), help="LLM model (e.g., gpt-4o, gpt-4-turbo, gpt-4o-mini)")
     parser.add_argument("--api-key", type=str, help="OpenAI API key (or use OPENAI_API_KEY env var)")
     parser.add_argument("--max-steps", type=int, default=50, help="Max steps")
     args = parser.parse_args()

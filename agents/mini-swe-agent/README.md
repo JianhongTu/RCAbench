@@ -1,52 +1,63 @@
-# Quick Start Guide
+# Mini-SWE-Agent Quick Start
 
 ## Prerequisites
 
 1. **Docker and Docker Compose** installed
-2. **OpenAI API Key** (or other LLM provider)
+2. **OpenAI API Key** configured in `path.sh`
 3. **ARVO Docker images** available (e.g., `n132/arvo:10055-vul`)
 
-## Step 1: Set Environment Variables
+## Getting Started
 
-```bash
-export OPENAI_API_KEY=your-api-key-here
-export WORKSPACE_DIR="./workspace"
-export LOG_DIR="./logs"
-export TMP_DIR="/tmp/rcabench"
-export MODEL="gpt-4o-mini"
-export MAX_STEPS=50
-```
+Choose one option below:
 
-## Step 2: Start Services
+| Option | How it Works | Best For |
+|--------|------------|----------|
+| **A - AgentBeats** | Starts agents locally + sends tasks automatically | Development (fastest, all-in-one) |
+| **B - Docker Compose** | Runs agents in Docker containers + manual task sending | Testing in containerized environment |
+| **C - Manual Scripts** | Starts agents locally with scripts + manual task sending | Debugging individual agents |
 
-### Option A: Using Docker Compose (Recommended for Production)
+---
 
-```bash
-cd agents/mini-swe-agent
-docker-compose up --build
-```
-
-This will start:
-- **Green Agent** on `http://localhost:9009`
-- **Purple Agent** on `http://localhost:9019`
-
-### Option B: Using scenario.toml (Recommended for Development)
+### Option A: Using AgentBeats (Recommended for Development)
 
 **Quick Start (All-in-one):**
 ```bash
 cd agents/mini-swe-agent
 source path.sh
-./run.sh [arvo_id|--all]
-./run.sh 14368  # Run specific task
-./run.sh  # Uses all task_ids from scenario.toml
-./run.sh --all  # Explicitly run all tasks from scenario.toml
+uv run agentbeats-run scenario.toml
 ```
 
 This will:
-1. Start both agents with the ARVO task ID (from command line or scenario.toml)
-2. Wait for agents to start
-3. Send the task(s) automatically (all tasks from scenario.toml if no ID specified)
-4. Keep agents running (press Ctrl+C to stop)
+1. Start both agents (green and purple) automatically
+2. Load tasks from `scenario.toml`
+3. Send and execute the task(s) automatically
+4. Evaluate results and show metrics
+5. Shutdown gracefully when complete
+
+### Option B: Using Docker Compose (Containerized Deployment)
+
+**Terminal 1 - Build and start containers:**
+```bash
+cd agents/mini-swe-agent
+source path.sh
+docker-compose up --build
+```
+
+This will:
+- Build Docker images for both agents
+- Start **Green Agent** in a container on `http://localhost:9009`
+- Start **Purple Agent** in a container on `http://localhost:9019`
+- Agents run automatically inside containers
+
+**Terminal 2 - Send tasks** (in another terminal):
+```bash
+cd agents/mini-swe-agent
+source path.sh
+python send_task.py [arvo_id|--all]
+python send_task.py --all  # Run all tasks from scenario.toml
+```
+
+### Option C: Using Manual Scripts (For Development)
 
 **Manual Start (Two Steps):**
 
@@ -71,23 +82,7 @@ python send_task.py --all  # Explicitly use all task_ids from scenario.toml
 
 **Note:** If no ARVO ID is provided, both scripts will use **all** `task_ids` from `scenario.toml`'s `config.task_ids` array. Use `--all` to explicitly run all tasks, or provide a specific ID to run just one.
 
-### Option C: Running Manually (Alternative)
-
-**Terminal 1 - Green Agent:**
-```bash
-cd agents/mini-swe-agent
-source path.sh
-python green_agent_server.py --port 9009 --purple-agent-url http://127.0.0.1:9019/
-```
-
-**Terminal 2 - Purple Agent:**
-```bash
-cd agents/mini-swe-agent
-source path.sh
-python purple_agent_server.py --port 9019 --green-agent-url http://127.0.0.1:9009/
-```
-
-## Step 3: Verify Services
+## Monitoring Execution
 
 Check that both agents are running:
 
@@ -99,11 +94,11 @@ curl http://localhost:9009/.well-known/agent-card.json
 curl http://localhost:9019/.well-known/agent-card.json
 ```
 
-## Step 4: Send a Task
+## Sending Tasks
 
-**Quick Start:** Use the all-in-one script (see Step 2, Option B) which handles everything automatically.
+**With AgentBeats (Option A):** Tasks are sent automatically - no manual step needed.
 
-**Manual:** If you started agents manually, use the send script:
+**With Manual Scripts (Option C):** Use the send script:
 
 ```bash
 cd agents/mini-swe-agent
@@ -174,7 +169,7 @@ curl -X POST http://localhost:9019/ \
   }'
 ```
 
-## Step 5: Monitor Execution
+## Viewing Logs
 
 ```bash
 # Watch green agent logs
@@ -187,7 +182,7 @@ docker-compose logs -f purple-agent
 docker ps | grep arvo
 ```
 
-## Step 6: Check Results
+## Checking Results
 
 After task completion, check for submission files:
 

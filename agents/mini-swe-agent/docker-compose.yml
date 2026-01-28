@@ -12,8 +12,8 @@ version: '3.8'
 services:
   green-agent:
     build:
-      context: .
-      dockerfile: Dockerfile.green
+      context: ../../
+      dockerfile: agents/mini-swe-agent/Dockerfile.green
     image: mini-swe-agent-green:latest
     container_name: green-agent
     ports:
@@ -26,6 +26,7 @@ services:
       - ../../src:/home/agent/src:ro  # Mount agentbeats and rcabench source
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MODEL=${MODEL}
       - PYTHONPATH=/home/agent:/home/agent/src:/workspace
     command: ["--host", "0.0.0.0", "--port", "9009"]
     networks:
@@ -34,8 +35,8 @@ services:
 
   purple-agent:
     build:
-      context: .
-      dockerfile: Dockerfile.purple
+      context: ../../
+      dockerfile: agents/mini-swe-agent/Dockerfile.purple
     image: mini-swe-agent-purple:latest
     container_name: purple-agent
     ports:
