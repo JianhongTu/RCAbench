@@ -13,8 +13,7 @@ Choose one option below:
 | Option | How it Works | Best For |
 |--------|------------|----------|
 | **A - AgentBeats** | Starts agents locally + sends tasks automatically | Development (fastest, all-in-one) |
-| **B - Docker Compose** | Runs agents in Docker containers + manual task sending | Testing in containerized environment |
-| **C - Manual Scripts** | Starts agents locally with scripts + manual task sending | Debugging individual agents |
+| **B - Manual Scripts** | Starts agents locally with scripts + manual task sending | Debugging individual agents |
 
 ---
 
@@ -23,7 +22,7 @@ Choose one option below:
 **Quick Start (All-in-one):**
 ```bash
 cd agents/mini-swe-agent
-source path.sh
+source env.sh (Create a duplicate file from example_env.sh)
 uv run agentbeats-run scenario.toml
 ```
 
@@ -34,37 +33,14 @@ This will:
 4. Evaluate results and show metrics
 5. Shutdown gracefully when complete
 
-### Option B: Using Docker Compose (Containerized Deployment)
-
-**Terminal 1 - Build and start containers:**
-```bash
-cd agents/mini-swe-agent
-source path.sh
-docker-compose up --build
-```
-
-This will:
-- Build Docker images for both agents
-- Start **Green Agent** in a container on `http://localhost:9009`
-- Start **Purple Agent** in a container on `http://localhost:9019`
-- Agents run automatically inside containers
-
-**Terminal 2 - Send tasks** (in another terminal):
-```bash
-cd agents/mini-swe-agent
-source path.sh
-python send_task.py [arvo_id|--all]
-python send_task.py --all  # Run all tasks from scenario.toml
-```
-
-### Option C: Using Manual Scripts (For Development)
+### Option B: Using Manual Scripts (For Development)
 
 **Manual Start (Two Steps):**
 
 Start both agents from configuration:
 ```bash
 cd agents/mini-swe-agent
-source path.sh
+source env.sh (Create a duplicate file from example_env.sh)
 python start_agents.py [--arvo-id <arvo_id>]
 python start_agents.py  # Uses first task_id from scenario.toml
 python start_agents.py --arvo-id 14368  # Override with specific ID
