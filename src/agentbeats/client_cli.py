@@ -130,9 +130,12 @@ async def main():
 
     if output_path:
         all_data_parts = []
-        for artifact in artifacts:
-            _, data_parts = parse_parts(artifact.parts)
-            all_data_parts.extend(data_parts)
+        if artifacts:
+            for artifact in artifacts:
+                _, data_parts = parse_parts(artifact.parts)
+                all_data_parts.extend(data_parts)
+        else:
+            print("Warning: No artifacts received from evaluation")
 
         output_data = {
             "participants": role_to_id,
