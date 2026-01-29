@@ -653,8 +653,8 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                 
                 # Evaluate against ground truth
                 try:
-                    from rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
-                    from rcabench.server.eval_utils import evaluate_localization, Localization, LineSpan
+                    from rcabench.server.eval_utils import get_ground_truth, evaluate_localization, Localization, LineSpan
+                    from rcabench.server.ground_truth_utils import augment_ground_truth_with_functions
                     
                     # Get ground truth
                     asset_path = str(task_context.agent_paths.agent_dir)
@@ -979,18 +979,38 @@ class RCAGreenAgentAdapter(GreenAgent):
     
     def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
         """Validate that the request has required fields."""
-        if "task_ids" not in request.config:
-            return False, "task_ids required in config"
+        if "task_ids" not in request.config and "task_ids_file" not in request.config:
+            return False, "task_ids or task_ids_file required in config"
         return True, ""
     
     async def run_eval(self, request: EvalRequest, updater: TaskUpdater) -> None:
         """Run evaluation for all tasks in the request."""
+        import random
+        import os
+        
         print("="*60)
         print(f"[GREEN] 🎯 RCAGreenAgentAdapter.run_eval() CALLED!")
         print(f"[GREEN] Request config: {request.config}")
         print("="*60)
         
+        # Load task IDs from config or file
         task_ids = request.config.get("task_ids", [])
+        if not task_ids:
+            task_ids_file = request.config.get("task_ids_file")
+            if task_ids_file and os.path.exists(task_ids_file):
+                with open(task_ids_file, "r") as f:
+                    if task_ids_file.endswith(".json"):
+                        import json
+                        task_ids = json.load(f)
+                    else:
+                        task_ids = [line.strip() for line in f if line.strip()]
+                logger.info(f"[GREEN] Loaded {len(task_ids)} task IDs from {task_ids_file}")
+        
+        # Random sampling if num_tasks is specified
+        num_tasks = request.config.get("num_tasks")
+        if num_tasks is not None and num_tasks > 0 and num_tasks < len(task_ids):
+            task_ids = random.sample(task_ids, num_tasks)
+            logger.info(f"[GREEN] Randomly sampled {num_tasks} task(s) from available tasks")
         
         # Get purple agent endpoint from participants
         purple_endpoint = None

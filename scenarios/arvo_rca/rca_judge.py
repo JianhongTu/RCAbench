@@ -15,7 +15,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
-from a2a.types import TaskState, AgentCard, AgentCapabilities
+from a2a.types import TaskState, AgentCard, AgentCapabilities, Part, TextPart
 from a2a.utils import new_agent_text_message
 
 from agentbeats.models import EvalRequest, EvalResult
@@ -24,9 +24,9 @@ from agentbeats.tool_provider import ToolProvider
 
 # Local imports
 try:
-    from rca_judge_common import TaskResult, ReasoningTrace
+    from rca_judge_common import TaskResult, ReasoningTrace, OverallEvalResult
 except ImportError:
-    from scenarios.arvo_rca.rca_judge_common import TaskResult, ReasoningTrace
+    from scenarios.arvo_rca.rca_judge_common import TaskResult, ReasoningTrace, OverallEvalResult
 
 try:
     from tools.bash_executor import BashExecutor
@@ -134,7 +134,52 @@ class RCAJudge(GreenAgent):
                 new_agent_text_message(result_text, context_id=updater.context_id)
             )
 
-        summary = f"Evaluation complete. Processed {len(results)} tasks."
+        # Aggregate results across all tasks
+        if results:
+            successful_results = [r for r in results if r.success]
+            
+            # Calculate averages (use all results, not just successful ones, for accurate metrics)
+            avg_file_acc = sum(r.file_acc for r in results) / len(results)
+            avg_line_iou = sum(r.line_iou_mean for r in results) / len(results)
+            avg_line_proximity = sum(r.line_proximity_mean for r in results) / len(results)
+            
+            # For top-k recalls, average over all results
+            avg_func_top1 = sum(r.func_topk_recall.get(1, 0.0) for r in results) / len(results)
+            avg_line_top1 = sum(r.line_topk_recall.get(1, 0.0) for r in results) / len(results)
+            
+            # LLM scores (only from results that have them)
+            llm_results = [r for r in results if r.llm_judgment is not None]
+            avg_llm_score = sum(r.llm_judgment.score for r in llm_results) / len(llm_results) if llm_results else 0.0
+            
+            reasoning_results = [r for r in results if r.llm_judgment and r.llm_judgment.reasoning_judgment]
+            avg_reasoning_score = sum(r.llm_judgment.reasoning_judgment.reasoning_score for r in reasoning_results) / len(reasoning_results) if reasoning_results else 0.0
+            
+            overall_result = OverallEvalResult(
+                total_tasks=len(results),
+                successful_tasks=len(successful_results),
+                avg_file_acc=avg_file_acc,
+                avg_line_iou=avg_line_iou,
+                avg_line_proximity=avg_line_proximity,
+                avg_func_top1_recall=avg_func_top1,
+                avg_line_top1_recall=avg_line_top1,
+                avg_llm_score=avg_llm_score,
+                avg_reasoning_score=avg_reasoning_score,
+                task_results=results,
+                summary=f"Evaluated {len(results)} tasks. File accuracy: {avg_file_acc*100:.1f}%, Line IoU: {avg_line_iou*100:.1f}%",
+            )
+            
+            # Send final aggregated result as artifact
+            await updater.add_artifact(
+                parts=[
+                    Part(root=TextPart(text=json.dumps(overall_result.model_dump())))
+                ],
+                name="evaluation_results"
+            )
+            
+            summary = f"Evaluation complete. {len(results)} tasks, avg file_acc={avg_file_acc*100:.1f}%"
+        else:
+            summary = "Evaluation complete. No tasks processed."
+        
         logger.info(summary)
 
     async def _process_task(self, arvo_id: str, config: Dict[str, Any], updater: TaskUpdater) -> TaskResult:

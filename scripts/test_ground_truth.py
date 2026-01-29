@@ -21,7 +21,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from rcabench.task.gen_task import prepare_task_assets, cleanup_task_assets
-from rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
+from rcabench.server.eval_utils import get_ground_truth
+from rcabench.server.ground_truth_utils import augment_ground_truth_with_functions
 
 
 def test_ground_truth(task_id: str = None):
