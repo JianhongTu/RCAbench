@@ -43,11 +43,11 @@ except ImportError:
 
 # Import EvalReport and ground truth utilities from rcabench
 try:
-    from rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan
-    from rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
+    from rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan, get_ground_truth
+    from rcabench.server.ground_truth_utils import augment_ground_truth_with_functions
 except ImportError:
-    from src.rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan
-    from src.rcabench.server.ground_truth_utils import get_ground_truth, augment_ground_truth_with_functions
+    from src.rcabench.server.eval_utils import EvalReport, evaluate_localization, Localization, LineSpan, get_ground_truth
+    from src.rcabench.server.ground_truth_utils import augment_ground_truth_with_functions
 
 # Set up logging
 logging.basicConfig(
