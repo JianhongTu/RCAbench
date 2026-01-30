@@ -50,7 +50,7 @@ class Localization(BaseModel):
 
 
 FILE_BLOCK_RE = re.compile(
-    r"^diff\s[^\n]*\n(?:^---\s+a/.*\n^\+\+\+\s+b/([^\s]+)[^\n]*\n)", re.MULTILINE
+    r"^diff\s[^\n]*\n(?:^index\s[^\n]*\n)?^---\s+a/.*\n^\+\+\+\s+b/([^\s]+)[^\n]*\n", re.MULTILINE
 )
 HUNK_RE = re.compile(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", re.MULTILINE)
 
