@@ -658,7 +658,9 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
                     
                     # Get ground truth
                     asset_path = str(task_context.agent_paths.agent_dir)
+                    print(f"[DEBUG] Fetching ground truth for arvo:{task_context.arvo_id}, asset_path={asset_path}")
                     gts = get_ground_truth(task_context.arvo_id, asset_path=asset_path)
+                    print(f"[DEBUG] Ground truth fetched: {len(gts) if gts else 0} localizations")
                     
                     if gts:
                         # Augment with function names
@@ -775,8 +777,12 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
 
                     else:
                         logger.warning(f"[GREEN] No ground truth available for {task_context.arvo_id}")
+                        print(f"[DEBUG] ❌ No ground truth available for {task_context.arvo_id}")
                 except Exception as e:
                     logger.warning(f"[GREEN] Evaluation failed: {e}", exc_info=True)
+                    print(f"[DEBUG] ❌ EVALUATION EXCEPTION: {e}")
+                    import traceback
+                    traceback.print_exc()
             except Exception as e:
                 logger.warning(f"Error reading submission: {e}")
                 print(f"[DEBUG] Error reading submission: {e}")
@@ -797,10 +803,10 @@ Submit your findings ONLY after you have thoroughly examined the relevant code f
         # Cleanup task assets (workspace directory on host filesystem)
         if task_context.agent_paths:
             try:
-                        cleanup_task_assets(task_context.agent_paths)
-                        logger.info(f"[GREEN] Cleaned up task assets for {task_context.arvo_id}")
+                cleanup_task_assets(task_context.agent_paths)
+                logger.info(f"[GREEN] Cleaned up task assets for {task_context.arvo_id}")
             except Exception as e:
-                        logger.warning(f"[GREEN] Error cleaning up task assets: {e}", exc_info=True)
+                logger.warning(f"[GREEN] Error cleaning up task assets: {e}", exc_info=True)
             
         # Remove ARVO-specific log handler
         if task_context.arvo_log_handler:
@@ -997,20 +1003,57 @@ class RCAGreenAgentAdapter(GreenAgent):
         task_ids = request.config.get("task_ids", [])
         if not task_ids:
             task_ids_file = request.config.get("task_ids_file")
-            if task_ids_file and os.path.exists(task_ids_file):
-                with open(task_ids_file, "r") as f:
-                    if task_ids_file.endswith(".json"):
-                        import json
-                        task_ids = json.load(f)
-                    else:
-                        task_ids = [line.strip() for line in f if line.strip()]
-                logger.info(f"[GREEN] Loaded {len(task_ids)} task IDs from {task_ids_file}")
+            if task_ids_file:
+                # Try multiple paths: as-is, with data/ prefix, absolute
+                possible_paths = [
+                    task_ids_file,
+                    f"data/{task_ids_file}",
+                    f"/app/data/{task_ids_file}",
+                    f"/home/agent/data/{task_ids_file}",
+                ]
+                found_path = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        found_path = path
+                        break
+                
+                if found_path:
+                    with open(found_path, "r") as f:
+                        if found_path.endswith(".json"):
+                            import json
+                            task_ids = json.load(f)
+                        else:
+                            task_ids = [line.strip() for line in f if line.strip()]
+                    logger.info(f"[GREEN] Loaded {len(task_ids)} task IDs from {found_path}")
+                else:
+                    logger.error(f"[GREEN] Could not find task_ids_file. Tried: {possible_paths}")
+                    logger.error(f"[GREEN] Current working directory: {os.getcwd()}")
+                    logger.error(f"[GREEN] Directory contents: {os.listdir('.')}")
         
         # Random sampling if num_tasks is specified
         num_tasks = request.config.get("num_tasks")
         if num_tasks is not None and num_tasks > 0 and num_tasks < len(task_ids):
             task_ids = random.sample(task_ids, num_tasks)
             logger.info(f"[GREEN] Randomly sampled {num_tasks} task(s) from available tasks")
+        
+        # Handle case where no tasks are found
+        if not task_ids:
+            logger.error(f"[GREEN] No task IDs found! Cannot proceed with evaluation.")
+            from a2a.types import Part, TextPart, DataPart
+            error_result = {
+                "domain": "arvo_rca",
+                "error": "No task IDs found. Check task_ids_file path.",
+                "n_tasks": 0,
+            }
+            await updater.add_artifact(
+                parts=[
+                    Part(root=TextPart(text="Error: No task IDs found")),
+                    Part(root=DataPart(data=error_result)),
+                ],
+                name="Result"
+            )
+            await updater.complete()
+            return
         
         # Get purple agent endpoint from participants
         purple_endpoint = None
