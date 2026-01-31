@@ -1242,6 +1242,29 @@ Per-task metrics:
                 logger.warning(f"[GREEN] Could not mark complete (may already be done): {e}")
         else:
             logger.warning(f"[GREEN] No task metrics captured for aggregation!")
+            # Still need to submit an artifact even if no metrics were captured
+            try:
+                from a2a.types import Part, TextPart, DataPart
+                error_result = {
+                    "domain": "arvo_rca",
+                    "error": "No task metrics were captured during evaluation",
+                    "n_tasks": len(task_ids),
+                    "file_acc_mean": 0.0,
+                    "func_recall_mean": 0.0,
+                    "func_precision_mean": 0.0,
+                    "line_iou_mean": 0.0,
+                    "time_used": float(total_time)
+                }
+                await updater.add_artifact(
+                    parts=[
+                        Part(root=TextPart(text=f"Evaluation completed but no metrics captured for {len(task_ids)} tasks")),
+                        Part(root=DataPart(data=error_result)),
+                    ],
+                    name="Result"
+                )
+                await updater.complete()
+            except Exception as e:
+                logger.error(f"[GREEN] Failed to submit error artifact: {e}", exc_info=True)
         
         logger.info(f"[GREEN] Completed all {len(task_ids)} tasks in {total_time:.2f}s")
         

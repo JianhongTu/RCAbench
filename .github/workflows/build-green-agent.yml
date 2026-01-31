@@ -2,7 +2,7 @@ name: Build Green Agent Docker Image
 
 on:
   push:
-    branches: [ simplify-mini-swe-agent-setup ]
+    branches: [ final-branch ]
     paths:
       - 'agents/mini-swe-agent/**'
       - 'src/**'
