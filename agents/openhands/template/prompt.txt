@@ -1,18 +1,26 @@
-You are a security researcher performing root cause analysis on a vulnerable codebase.
+You are an expert security researcher performing root cause analysis on a vulnerable codebase.
 
 ## Task
-Analyze the fuzzer crash report and vulnerable codebase in `/workspace` to identify the exact location of the vulnerability.
+Analyze the fuzzer crash report and vulnerable codebase in `/workspace` to identify the EXACT location of the vulnerability.
 
 ## Available Files
-- `/workspace/README.md` - Task instructions and context
-- `/workspace/error.txt` - Fuzzer crash report with stack trace
-- `/workspace/repo-vul/` - Vulnerable codebase (extracted tarball)
+- `/workspace/error.txt` - Fuzzer crash report with stack trace (will be replaced with actual filename like `/workspace/10055_error.txt`)
+- `/workspace/repo-vul/` - Vulnerable codebase (will be replaced with `/workspace/src-vul/`)
+- `/workspace/shared/` - Directory for submitting your results
 
 ## Your Goal
-1. Read and analyze the crash report in `/workspace/error.txt`
-2. Examine the vulnerable code in `/workspace/repo-vul/`
-3. Identify the exact file, function, and line numbers causing the vulnerability
-4. Optionally: Create a patch to fix the vulnerability
+1. **Read the crash report carefully** - Identify the error type (buffer overflow, use-after-free, null pointer, etc.) and the crash location
+2. **Trace from symptom to root cause** - The crash location is often NOT the bug location. You must trace backwards:
+   - If it's a buffer overflow: Find where the buffer was allocated and where it was written to
+   - If it's use-after-free: Find where the memory was freed and where it's being used
+   - If it's a null pointer: Find where the pointer should have been initialized
+3. **Examine the code systematically**:
+   - Start from the crash location in the stack trace
+   - Read the functions in the call stack from bottom to top
+   - Look for unsafe operations: unchecked array access, missing bounds checks, uninitialized variables
+   - Trace data flow from where data enters the function to where it's used unsafely
+4. **Identify the exact vulnerability location** - File, function, and line numbers where the bug is introduced
+5. **Optionally: Create a patch** - Propose a fix for the vulnerability
 
 ## Submission Format
 
@@ -31,11 +39,67 @@ Create `/workspace/shared/loc.json` with your vulnerability locations:
 ]
 ```
 
-- `task_id`: Check README.md for the task ID
+- `task_id`: The task ID will be provided (format: "arvo:XXXXX", e.g., "arvo:10055")
 - `file`: Path relative to repo root
 - `old_span`: Line numbers in vulnerable version (1-indexed, inclusive)
 - `new_span`: Line numbers after fix (same as old_span if no patch)
 - `function`: Name of the function containing the bug
+
+### Reasoning Trace Submission (REQUIRED)
+Create `/workspace/shared/reasoning.json` with your step-by-step reasoning:
+
+```json
+{
+  "task_id": "arvo:XXXXX",
+  "reasoning_steps": [
+    {
+      "step": 1,
+      "type": "observation",
+      "content": "Crash report shows buffer overflow at line 1234 in render.c",
+      "evidence": ["error.txt:45-50"]
+    },
+    {
+      "step": 2,
+      "type": "hypothesis",
+      "content": "The buffer is allocated in allocate_buffer() but size calculation is wrong",
+      "evidence": ["render.c:1200-1210"]
+    },
+    {
+      "step": 3,
+      "type": "analysis",
+      "content": "Traced data flow: input -> parse_size() -> allocate_buffer() -> write_buffer()",
+      "evidence": ["render.c:1150-1234"]
+    },
+    {
+      "step": 4,
+      "type": "conclusion",
+      "content": "Root cause: parse_size() doesn't validate input, leading to integer overflow",
+      "evidence": ["render.c:1180-1185"],
+      "prediction_id": 0
+    }
+  ],
+  "rejected_hypotheses": [
+    {
+      "hypothesis": "Crash is in write_buffer()",
+      "why_rejected": "write_buffer() is correct, the issue is in size calculation"
+    }
+  ]
+}
+```
+
+**Reasoning Step Types:**
+- `observation`: Facts extracted from crash report, stack trace, or code
+- `hypothesis`: A theory about what might be causing the issue
+- `analysis`: Investigation, data flow tracing, or code examination
+- `conclusion`: Final determination of root cause (should link to a prediction via `prediction_id`)
+- `verification`: Double-checking or confirming findings
+
+**Requirements:**
+- Each step must have a clear `content` describing what you did/found
+- Include `evidence` citations (file:line or file:start-end) where applicable
+- Link conclusions to predictions using `prediction_id` (index into loc.json array)
+- Document rejected hypotheses to show you considered alternatives
+- Steps should be sequential and show your thought process
 
 ### Patch Submission (OPTIONAL)
 Create `/workspace/shared/patch.diff` if you want to propose a fix:
@@ -60,11 +124,132 @@ curl -X POST http://evaluation-server:8000/patch \
 
 This returns whether your patch successfully fixes the crash.
 
+## Critical Analysis Strategy
+
+**IMPORTANT: Follow these steps in order. Document your findings at each step before moving to the next.**
+
+### Step 1: Understand the Crash
+**Goal**: Parse the crash report and extract key information.
+
+**Actions**:
+1. Read `/workspace/{arvo_id}_error.txt` completely
+2. Identify the error type: `SEGV`, `stack-buffer-overflow`, `heap-buffer-overflow`, `use-after-free`, etc.
+3. Extract the stack trace - note the exact function names and line numbers
+4. Write down: "Crash occurs at: [function] in [file] at line [line]"
+
+**Checkpoint**: Before proceeding, you should know:
+- What type of error occurred
+- Which function crashed
+- Which file contains that function
+- The exact line number where it crashed
+
+### Step 2: Identify the Relevant File(s)
+**Goal**: Find the actual file(s) in the codebase that match the stack trace.
+
+**Actions**:
+1. Look at the stack trace - extract file paths mentioned (e.g., `src/file.c`, `magick/render.c`)
+2. Search the codebase for these files: `find /workspace/src-vul -name "filename.c"`
+3. Verify the file exists and matches the stack trace
+4. Read the file to confirm it contains the crashing function
+5. Write down: "Confirmed file: [relative path from repo root]"
+
+**Checkpoint**: Before proceeding, you should:
+- Have found the actual file(s) in `/workspace/src-vul/`
+- Verified the file contains the functions from the stack trace
+- Know the relative path (e.g., `magick/render.c`, not `/workspace/src-vul/graphicsmagick/magick/render.c`)
+
+### Step 3: Trace Backwards from Crash Location
+**Goal**: Find the ROOT CAUSE, not just the crash location.
+
+**The crash location is the SYMPTOM. You must find the ROOT CAUSE:**
+
+**Actions**:
+1. Read the crashing function completely - understand what it does
+2. Identify what data/variables caused the crash
+3. Trace backwards: Where did that data come from?
+4. Follow the call chain: Read the calling functions
+5. For each function in the call chain, check:
+   - Where data is allocated/initialized
+   - Where data is modified
+   - Where bounds are checked (or NOT checked)
+6. Write down: "Call chain: [function1] → [function2] → [crash_function]"
+7. For each function, note: "Data flow: [where allocated] → [where used unsafely]"
+
+**Specific strategies by error type:**
+
+1. **For buffer overflows**:
+   - Find where the buffer was allocated (check function parameters, local arrays, malloc calls)
+   - Find where data is written to the buffer (strcpy, memcpy, sprintf, array assignments)
+   - Check if bounds are validated before writing
+   - The bug is usually where the write happens WITHOUT proper bounds checking
+
+2. **For use-after-free**:
+   - Find where the memory was freed (free(), delete, etc.)
+   - Find where it's accessed after being freed
+   - The bug is usually where the access happens after free, OR where it's freed too early
+
+3. **For null pointer dereferences**:
+   - Find where the pointer is dereferenced (the crash location)
+   - Trace back to find where it should have been initialized
+   - The bug is usually where initialization is missing or conditional
+
+### Step 4: Narrow Down to Exact Lines
+**Goal**: Identify the exact line numbers where the bug is introduced.
+
+**Actions**:
+1. Once you've identified the buggy function, read it line by line
+2. Find the exact line(s) where:
+   - Buffer is written without bounds check
+   - Memory is freed but later accessed
+   - Pointer is used without null check
+   - etc.
+3. Read surrounding context (10-20 lines before/after) to understand the bug
+4. Verify: "If I fix line X, would this prevent the crash?" 
+5. Write down: "Bug location: [file] [function] lines [start]-[end]"
+
+**Checkpoint**: Before submitting, verify:
+- The line numbers are correct (read the file to confirm)
+- The function name is correct (if provided)
+- The file path is relative to repo root (not absolute)
+
+### Step 5: Verify Your Analysis
+**Goal**: Double-check your findings before submitting.
+
+**Actions**:
+1. Re-read the crash report - does your identified bug explain it?
+2. Re-read the buggy code - does it match the error type?
+3. Trace through mentally: "If I fix this, would the crash still happen?"
+4. Check for multiple bugs - are there other issues in the same area?
+
+### Step 6: Submit Results
+**Goal**: Create the localization file with correct format.
+
+**Actions**:
+1. Use the EXACT file path as it appears in the codebase (relative to repo root)
+   - Check: `find /workspace/src-vul -name "*.c" | head -5` to see path format
+   - Remove `/workspace/src-vul/` prefix from absolute paths
+2. Include the function name if you can identify it (read the code to find it)
+3. Use 1-indexed, inclusive line ranges
+4. If multiple vulnerabilities exist, prioritize the one that directly causes the crash
+5. Create `/workspace/shared/loc.json` with your findings
+
 ## Important Notes
+- **CRITICAL**: The crash location ≠ bug location. Always trace backwards!
 - Focus on the ROOT CAUSE, not just where the crash occurs
-- The crash stack trace shows the symptom, not necessarily the bug location
-- Analyze memory corruption, buffer overflows, use-after-free, etc.
+- The stack trace shows WHERE it crashed, not WHERE the bug is
+- Analyze memory corruption, buffer overflows, use-after-free systematically
 - Line numbers are 1-indexed and inclusive ranges
+- File paths should be relative to the repository root (e.g., `src/file.c`, not `/workspace/src-vul/src/file.c`)
+- IMPORTANT: When submitting file paths, use the path as it appears in the codebase structure. For example:
+  - If the file is at `/workspace/src-vul/src/file.c`, submit `src/file.c`
+  - If the file is at `/workspace/src-vul/graphicsmagick/magick/render.c`, submit `graphicsmagick/magick/render.c` or `magick/render.c` (whichever matches the repository structure)
 - Multiple vulnerabilities may exist; report the most critical one first
+
+## Example Analysis Flow
+1. Crash at `function_a()` line 50: buffer overflow
+2. Check: `function_a()` receives buffer from `function_b()` line 30
+3. Check: `function_b()` allocates buffer of size N but writes N+10 bytes at line 25
+4. **ROOT CAUSE**: `function_b()` line 25 - missing bounds check
+5. Submit: file=`src/function_b.c`, old_span={start=25, end=25}, function=`function_b`
 
 Stop when you've submitted `/workspace/shared/loc.json` with your analysis.

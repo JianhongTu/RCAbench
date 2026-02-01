@@ -41,7 +41,10 @@ def _download_file(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        with httpx.Client(follow_redirects=True) as client:
+        # Use longer timeouts for large file downloads
+        # Connect: 10s, Read: 300s (5 minutes) for large codebase files
+        timeout = httpx.Timeout(10.0, read=300.0)
+        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
             response = client.get(url)
             # print(f"Status: {response.status_code}, URL: {response.url}")
             response.raise_for_status()
@@ -49,6 +52,8 @@ def _download_file(
                 output_path.write_text(response.text)
             else:
                 output_path.write_bytes(response.content)
+    except httpx.ReadTimeout as e:
+        raise ValueError(f"{unexpected_msg.format(e=e)}. The file may be large - try again or check your network connection.")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise ValueError(not_found_msg)
@@ -78,7 +83,10 @@ def _download_tmpfile(
     try:
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             try:
-                with httpx.Client(follow_redirects=True) as client:
+                # Use longer timeouts for large file downloads
+                # Connect: 10s, Read: 300s (5 minutes) for large codebase files
+                timeout = httpx.Timeout(10.0, read=300.0)
+                with httpx.Client(follow_redirects=True, timeout=timeout) as client:
                     response = client.get(url)
                     # print(f"Status: {response.status_code}, URL: {response.url}")
                     response.raise_for_status()
@@ -88,6 +96,8 @@ def _download_tmpfile(
                         temp_file.write(response.content)
 
                 return temp_file.name
+            except httpx.ReadTimeout as e:
+                raise ValueError(f"{unexpected_msg.format(e=e)}. The file may be large - try again or check your network connection.")
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     raise ValueError(not_found_msg)

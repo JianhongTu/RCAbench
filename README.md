@@ -4,22 +4,22 @@
 
 ## Overview
 
-RCAbench is built on three architectural layers:
+RCAbench uses a **Green-Purple Agent Architecture** based on the [A2A (Agent-to-Agent) protocol](https://google.github.io/A2A/):
 
-1. **Evaluation Server** (Host): Orchestrates the evaluation process, manages task assets, validates patches, and computes localization metrics.
-2. **Agent Environment**: Contains the LLM agent and scaffolding code that interacts with the test environment.
-3. **Test Environment**: Isolated Docker containers with vulnerable codebases, fuzzer reports, and build environments.
+1. **Green Agent**: Orchestrates the evaluation process, manages ARVO Docker containers, executes commands, and computes localization metrics.
+2. **Purple Agent**: The LLM-powered agent that performs root cause analysis by exploring the codebase and identifying vulnerability locations.
+3. **ARVO Containers**: Isolated Docker containers with vulnerable codebases, fuzzer reports, and build environments.
 
 The system uses the [Arvo dataset](https://github.com/n132/arvo-dataset) of real-world fuzzing vulnerabilities, providing ground truth patches and crash reports for evaluation.
 
 ## Key Features
 
+- **A2A Protocol**: Green and purple agents communicate via the standardized Agent-to-Agent protocol
 - **Automated Task Provisioning**: Downloads and prepares vulnerable codebases, patches, and crash reports from remote repositories
-- **Docker-Based Isolation**: Each task runs in a dedicated Docker container with pre-configured build environments
+- **Docker-Based Isolation**: Each task runs in a dedicated ARVO Docker container with pre-configured build environments
 - **Multi-Metric Evaluation**: Evaluates localization accuracy using file-level, function-level, and line-level metrics with IoU scoring
-- **RESTful API**: FastAPI server with endpoints for patch validation and localization evaluation
 - **Ground Truth Extraction**: Automatically parses patch diffs to extract vulnerability locations
-- **Agent-Agnostic Design**: Supports any LLM agent that can interact via the standardized API
+- **Leaderboard Integration**: Supports automated evaluation via [AgentBeats](https://agentbeats.dev) leaderboard
 
 ## Architecture
 
@@ -27,47 +27,49 @@ The system uses the [Arvo dataset](https://github.com/n132/arvo-dataset) of real
 
 ```
 RCAbench/
-├── src/rcabench/           # Core package
-│   ├── server/            # Evaluation server
-│   │   ├── main.py       # FastAPI application and CLI
-│   │   ├── server_utils.py # Docker container management
-│   │   ├── eval_utils.py  # Ground truth parsing and metrics
-│   │   └── db_utils.py    # SQLite database operations
-│   ├── task/              # Task provisioning
-│   │   └── gen_task.py    # Asset download and preparation
-│   ├── utils.py           # Remote file fetching utilities
-│   └── __init__.py        # Package configuration
-├── data/                   # Task metadata (git-ignored)
-│   ├── arvo.db            # SQLite database of Arvo tasks
-│   └── verified_jobs.json # List of verified task IDs
-├── tests/                  # Test suite
-│   ├── test_host.py       # End-to-end integration tests
-│   ├── test_evaluation.py # Localization metric tests
-│   └── test_*.py          # Component-level tests
-├── workspace/              # Shared workspace (git-ignored)
-│   └── shared/            # Agent-server communication (DEFAULT_WORKSPACE_DIR)
-│       ├── loc.json       # Localization submissions
-│       └── patch.diff     # Patch submissions
-├── agents/                 # Agent implementations
-│   └── openhands/         # OpenHands integration
-├── tmp/                    # Temporary cache (git-ignored)
-│   └── arvo_{arvo_id}-{agent_id}/  # Agent-specific temp directory
-│       └── workspace/              # Isolated workspace for each agent
-│           ├── shared/             # Shared resources directory
-│           ├── src-vul/            # Extracted vulnerable source code
-│           ├── {arvo_id}_error.txt # Fuzzer error report
-│           ├── submit_patch.sh     # Script to submit patches
-│           └── submit_loc.sh       # Script to submit localization results
-└── docker/                 # Container definitions
+├── agents/
+│   └── mini-swe-agent/        # Main agent implementation
+│       ├── green_agent_server.py   # Green agent (orchestrator)
+│       ├── purple_agent_server.py  # Purple agent (LLM analyzer)
+│       ├── docker_environment.py   # ARVO container management
+│       ├── Dockerfile.green        # Green agent Docker image
+│       ├── Dockerfile.purple       # Purple agent Docker image
+│       ├── docker-compose.yml      # Local testing setup
+│       └── scenario.toml           # Local scenario configuration
+├── src/
+│   ├── agentbeats/            # A2A client/server framework
+│   │   ├── client.py          # A2A message sending
+│   │   ├── client_cli.py      # CLI for running scenarios
+│   │   ├── green_executor.py  # Green agent execution framework
+│   │   └── models.py          # Data models
+│   └── rcabench/              # Core evaluation package
+│       ├── server/
+│       │   ├── eval_utils.py      # Ground truth parsing and metrics
+│       │   └── ground_truth_utils.py  # Additional ground truth functions
+│       ├── task/
+│       │   └── gen_task.py        # Asset download and preparation
+│       └── utils.py               # Remote file fetching utilities
+├── data/
+│   ├── successful_patches/    # Verified ground truth patches
+│   ├── successful_task_ids.txt # List of verified task IDs
+│   └── arvo.db                # SQLite database of Arvo tasks
+├── tests/                     # Test suite
+├── scripts/                   # Utility scripts
+├── docs/                      # Documentation
+│   ├── A2A_PROTOCOL_EXPLANATION.md
+│   └── RCABENCH_AGENTS_EXPLANATION.md
+└── .github/workflows/         # CI/CD
+    ├── build-green-agent.yml  # Build green agent Docker image
+    └── build-purple-agent.yml # Build purple agent Docker image
 ```
 
 ### Data Flow
 
-1. **Task Preparation**: Server downloads diff, error report, and codebase tarball for a given Arvo task ID
-2. **Agent Execution**: Agent analyzes the fuzzer crash report and vulnerable codebase
-3. **Submission**: Agent submits localization predictions (`loc.json`) and optional patches (`patch.diff`)
-4. **Validation**: Server runs patches in Docker containers to verify they fix the vulnerability
-5. **Evaluation**: Server compares predictions against ground truth and computes metrics
+1. **Task Initialization**: Green agent downloads task assets (diff, error report, codebase) and spins up an ARVO Docker container
+2. **A2A Communication**: Green agent sends task info to purple agent via A2A protocol
+3. **Analysis**: Purple agent explores the codebase by requesting bash commands from green agent
+4. **Submission**: Purple agent submits localization predictions (`loc.json`) to shared workspace
+5. **Evaluation**: Green agent compares predictions against ground truth and computes metrics
 
 ## Evaluation Metrics
 
@@ -83,10 +85,9 @@ Each metric provides insight into different granularities of vulnerability local
 ## Prerequisites
 
 - Python 3.11+
-- Docker (with Docker daemon running) - for local validation
-- Conda (recommended for environment management)
+- Docker (with Docker daemon running)
 - 10GB+ disk space for task assets
-- Kubernetes cluster access (for running jobs on NRP/Nautilus) - optional
+- OpenAI API key (or compatible LLM API)
 
 ## Quick Start
 
@@ -105,40 +106,45 @@ Each metric provides insight into different granularities of vulnerability local
    pip install -e .  # Install in development mode
    ```
 
-3. **Download task metadata**:
+3. **Set environment variables**:
    ```bash
-   python scripts/download_meta.py
+   export OPENAI_API_KEY="your-api-key"
    ```
-   This downloads the Arvo task database to `./data/arvo.db`.
 
-### Running the Evaluation Server
+### Running Locally with Docker Compose
 
-**Start the server**:
+The easiest way to run RCAbench locally:
+
 ```bash
-conda activate rcabench
-python -m rcabench.server.main start --host 0.0.0.0 --port 8000
+cd agents/mini-swe-agent
+
+# Set your API key
+export OPENAI_API_KEY="your-api-key"
+
+# Build and run both agents
+docker-compose up --build
 ```
 
-The server will be available at `http://localhost:8000`.
+This starts:
+- **Green agent** on port 9009
+- **Purple agent** on port 9019
 
-**API Endpoints**:
-- `GET /` - Health check
-- `POST /patch` - Validate a patch submission
-- `POST /evaluate` - Evaluate localization predictions
+### Running with the Leaderboard
+
+RCAbench integrates with [AgentBeats](https://agentbeats.dev) for automated evaluation:
+
+1. Fork the [RCAbench-leaderboard](https://github.com/shubham2345/RCAbench-leaderboard) repository
+2. Configure your purple agent in `scenario.toml`
+3. Push changes to trigger evaluation
+4. Results are automatically submitted and displayed on the leaderboard
 
 ### Testing
 
-Run the end-to-end integration test:
+Run the test suite:
 ```bash
 conda activate rcabench
-python tests/test_host.py
+python -m pytest tests/
 ```
-
-This test validates:
-- Evaluation server initialization
-- Task asset preparation
-- Patch validation workflow
-- Localization evaluation with mock submissions
 
 ### Example: Preparing a Task
 
@@ -154,14 +160,14 @@ prepare_task_assets(
 ```
 
 This downloads:
-- `10055_patch.diff` - The ground truth patch
-- `10055_error.txt` - Fuzzer crash report
+- `patch.diff` - The ground truth patch
+- `error.txt` - Fuzzer crash report
 - `repo-vul.tar.gz` - Vulnerable codebase archive
 
 ### Example: Evaluating Localizations
 
 ```python
-from rcabench.server.eval_utils import get_ground_truth, evaluate_localization
+from rcabench.server.eval_utils import get_ground_truth, evaluate_localization, Localization, LineSpan
 
 # Get ground truth for task
 gts = get_ground_truth("10055")
@@ -183,40 +189,46 @@ print(f"File Accuracy: {report.file_acc}")
 print(f"Line IoU: {report.line_iou_mean}")
 ```
 
-## CLI Commands
+## Building Docker Images
 
-The evaluation server provides a command-line interface:
+The green and purple agent Docker images are built automatically via GitHub Actions when pushing to the main branch.
+
+To build locally:
 
 ```bash
-# Start the evaluation server
-python -m rcabench.server.main start [--host HOST] [--port PORT]
+# Build green agent
+docker build -f agents/mini-swe-agent/Dockerfile.green -t rcabench-green-agent .
 
-# Clean up temporary files
-python -m rcabench.server.main teardown
+# Build purple agent
+docker build -f agents/mini-swe-agent/Dockerfile.purple -t rcabench-purple-agent .
 ```
 
 ## Localization Submission Format
 
-Agents submit predictions as JSON files in the shared workspace:
+Purple agents submit predictions as `loc.json` in the shared workspace:
 
 ```json
-[
-  {
-    "task_id": "arvo:10055",
-    "file": "magick/utility.c",
-    "old_span": {"start": 6357, "end": 6363},
-    "new_span": {"start": 6357, "end": 6363},
-    "function": ""
-  }
-]
+{
+  "reasoning": "Description of the vulnerability analysis...",
+  "locations": [
+    {
+      "file": "src/utility.c",
+      "function": "parse_input",
+      "line_start": 6357,
+      "line_end": 6363,
+      "description": "Buffer overflow due to unchecked length"
+    }
+  ]
+}
 ```
 
 Fields:
-- `task_id`: Arvo task identifier (format: `arvo:XXXXX`)
-- `file`: Relative path to the file within the codebase
-- `old_span`: Line range in the vulnerable version (1-indexed, inclusive)
-- `new_span`: Line range in the patched version
-- `function`: (Optional) Function name containing the vulnerability
+- `reasoning`: Explanation of the root cause analysis
+- `locations`: Array of suspected vulnerability locations
+  - `file`: Relative path to the file within the codebase
+  - `function`: Function name containing the vulnerability
+  - `line_start`/`line_end`: Line range (1-indexed, inclusive)
+  - `description`: Explanation of why this location is vulnerable
 
 ## Database Schema
 
@@ -252,10 +264,11 @@ python tests/test_evaluation.py
 
 ### Adding New Tasks
 
-1. Add task ID to `data/verified_jobs.json`
-2. Ensure the task exists in `data/arvo.db`
-3. Verify assets are available in the remote repository
-4. Test with `prepare_task_asssets()`
+1. Add task ID to `data/successful_task_ids.txt`
+2. Add the verified patch to `data/successful_patches/arvo_XXXXX.diff`
+3. Ensure the task exists in `data/arvo.db`
+4. Verify assets are available in the remote repository
+5. Test with `prepare_task_assets()`
 
 ---
 

@@ -1,0 +1,46 @@
+# Dockerfile for purple agent container
+# This container runs the purple agent that decides commands
+
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm
+
+ENV UV_HTTP_TIMEOUT=300
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies using UV (before creating user)
+RUN uv pip install --system \
+    openai>=1.0.0 \
+    uvicorn \
+    "a2a-sdk[http-server]" \
+    mini-swe-agent
+
+# Create non-root user
+RUN adduser --disabled-password --gecos '' agent
+USER agent
+
+# Set working directory
+WORKDIR /home/agent
+
+# Copy agent code
+COPY agents/mini-swe-agent/purple_agent_server.py agents/mini-swe-agent/a2a_environment.py agents/mini-swe-agent/utility.py ./
+
+# Copy src directory for agentbeats module
+COPY src/ /home/agent/src/
+
+# Note: For docker-compose, src/ can be mounted as volume for live updates
+# For standalone deployment (AgentBeats), src/ is baked into the image
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/home/agent:/home/agent/src:/workspace
+
+# Expose port
+EXPOSE 9019
+
+# Use ENTRYPOINT/CMD pattern with UV
+ENTRYPOINT ["uv", "run", "purple_agent_server.py"]
+CMD ["--host", "0.0.0.0", "--port", "9019"]
+
